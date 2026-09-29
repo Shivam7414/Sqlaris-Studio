@@ -1,0 +1,6 @@
+# Apache sends any file in this folder as it is. .env holds passwords, so it and every
+# other dotfile are refused, and so is layout.json, which names your databases.
+# src/ has its own .htaccess.
+<FilesMatch "^(\.|layout\.json)">
+    Require all denied
+</FilesMatch>
