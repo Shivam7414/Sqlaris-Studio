@@ -9,9 +9,12 @@ declare(strict_types=1);
 // The unit tests always run. The API tests run against each server named in
 // TEST_PGSQL_* or TEST_MYSQL_* (the same names as in .env, with TEST_ in
 // front), from the environment or from tests/.env. Each one gets a database
-// called sqlaris_test, made fresh for the run and dropped after it, so point
-// them at a server where that name is free.
+// called sqlaris_test, made fresh for the run and dropped after it, and the
+// tests of create_database and drop_database use a second name,
+// sqlaris_test_extra, dropped before the run and after it as well. Point them
+// at a server where both names are free.
 
+require __DIR__.'/coverage.php';
 require __DIR__.'/../../src/lib.php';
 require __DIR__.'/../../src/actions.php';
 require __DIR__.'/harness.php';
@@ -19,6 +22,10 @@ require __DIR__.'/unit.test.php';
 require __DIR__.'/api.test.php';
 
 const TEST_DATABASE = 'sqlaris_test';
+
+// The one other database the API tests may make. The config below lists it, since
+// create_database refuses a name the list would hide.
+const TEST_EXTRA_DATABASE = 'sqlaris_test_extra';
 
 $env = dbv_env_file(__DIR__.'/../.env') + getenv();
 $failed = 0;
@@ -46,7 +53,7 @@ foreach (['pg' => ['PGSQL', 'pgsql', 5432, 'postgres'], 'my' => ['MYSQL', 'mysql
         'username' => (string) ($env["TEST_{$prefix}_USERNAME"] ?? $user),
         'password' => (string) ($env["TEST_{$prefix}_PASSWORD"] ?? ''),
         'database' => 'postgres',
-        'only' => [TEST_DATABASE],
+        'only' => [TEST_DATABASE, TEST_EXTRA_DATABASE],
     ];
 }
 
@@ -71,24 +78,41 @@ if ($servers !== []) {
             $class = DBV_DRIVERS[$settings['driver']];
             $admin = $class::connect($settings, $settings['driver'] === 'pgsql' ? 'postgres' : null);
             test_database_drop($admin, $settings['driver']);
-            $admin->exec('create database '.TEST_DATABASE);
+            test_database_drop($admin, $settings['driver'], TEST_EXTRA_DATABASE);
 
-            $pdo = $class::connect($settings, TEST_DATABASE);
+            // Both databases are dropped again in "finally", so a run that stops half way leaves nothing behind.
+            try {
+                $admin->exec('create database '.TEST_DATABASE);
 
-            foreach (FIXTURES[$settings['driver']] as $statement) {
-                $pdo->exec($statement);
+                $pdo = $class::connect($settings, TEST_DATABASE);
+
+                foreach (FIXTURES[$settings['driver']] as $statement) {
+                    $pdo->exec($statement);
+                }
+
+                $version = (string) $pdo->query('select version()')->fetchColumn();
+                echo "\n{$settings['driver']}: ".strtok($version, ',')."\n";
+
+                $client = new TestClient($server);
+                $client->signIn($username, $password);
+                // A second browser, signed in, for the tests that end a session.
+                $signIn = function () use ($server, $username, $password): TestClient {
+                    $other = new TestClient($server);
+                    $other->signIn($username, $password);
+
+                    return $other;
+                };
+                TestClient::$succeeded = [];
+                api_tests("[{$settings['driver']}]", $settings['driver'], $client, $key.'/'.TEST_DATABASE, $pdo,
+                    fn (string $database): PDO => $class::connect($settings, $database), $signIn);
+                // Added last, so it runs after every test above has had its say.
+                route_test("[{$settings['driver']}]");
+                $failed += run_tests();
+            } finally {
+                $pdo = null;
+                test_database_drop($admin, $settings['driver']);
+                test_database_drop($admin, $settings['driver'], TEST_EXTRA_DATABASE);
             }
-
-            $version = (string) $pdo->query('select version()')->fetchColumn();
-            echo "\n{$settings['driver']}: ".strtok($version, ',')."\n";
-
-            $client = new TestClient($server);
-            $client->signIn($username, $password);
-            api_tests("[{$settings['driver']}]", $settings['driver'], $client, $key.'/'.TEST_DATABASE, $pdo);
-            $failed += run_tests();
-
-            $pdo = null;
-            test_database_drop($admin, $settings['driver']);
         }
     } finally {
         $server->stop();
@@ -99,12 +123,12 @@ if ($servers !== []) {
 echo $failed === 0 ? "\nAll passed.\n" : "\n{$failed} failed.\n";
 exit($failed === 0 ? 0 : 1);
 
-function test_database_drop(PDO $admin, string $driver): void
+function test_database_drop(PDO $admin, string $driver, string $name = TEST_DATABASE): void
 {
     if ($driver === 'pgsql') {
         // The viewer's own connections may still be open, so they are closed first.
-        $admin->exec("select pg_terminate_backend(pid) from pg_stat_activity where datname = '".TEST_DATABASE."' and pid <> pg_backend_pid()");
+        $admin->exec("select pg_terminate_backend(pid) from pg_stat_activity where datname = '".$name."' and pid <> pg_backend_pid()");
     }
 
-    $admin->exec('drop database if exists '.TEST_DATABASE);
+    $admin->exec('drop database if exists '.$name);
 }

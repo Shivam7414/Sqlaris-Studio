@@ -69,6 +69,32 @@ function run_tests(): int
 }
 
 /**
+ * Every action api.php answers, read from api.php itself, so a new action is
+ * on the list the moment it has a route.
+ */
+function api_actions(): array
+{
+    $source = (string) file_get_contents(dirname(__DIR__, 2).'/api.php');
+    preg_match_all('/\$action === \'(\w+)\'|^\s*\'(\w+)\' => /m', $source, $m);
+
+    return array_values(array_unique(array_filter([...$m[1], ...$m[2]])));
+}
+
+/**
+ * Fails when an action never answered 200 in the tests that ran before it. A
+ * route whose tests only check refusals has not been shown to work at all.
+ */
+function route_test(string $tag): void
+{
+    test("{$tag} every action in api.php works in at least one test", function () {
+        $actions = api_actions();
+        check(count($actions) > 20 && in_array('rows', $actions, true), 'the actions were not found in api.php: '.implode(', ', $actions));
+        $missing = array_values(array_diff($actions, array_keys(TestClient::$succeeded)));
+        check($missing === [], 'no test makes these work: '.implode(', ', $missing));
+    });
+}
+
+/**
  * The viewer, running on PHP's built-in server with a config of the tests'
  * own. Requests go through router.php, index.php and api.php exactly as a
  * browser's do.
@@ -76,6 +102,9 @@ function run_tests(): int
 final class TestServer
 {
     public readonly string $base;
+
+    /** Where this server keeps the sidebar layout, so a test can read the file itself. */
+    public readonly string $layout;
 
     /** Where this server keeps saved diagram views, so a test can read the file itself. */
     public readonly string $views;
@@ -87,10 +116,11 @@ final class TestServer
         $root = dirname(__DIR__, 2);
         $env = getenv() + [];
         $env['SQLARIS_CONFIG'] = $config;
-        $env['SQLARIS_LAYOUT'] = sys_get_temp_dir().'/sqlaris-test-layout-'.$port.'.json';
+        $this->layout = sys_get_temp_dir().'/sqlaris-test-layout-'.$port.'.json';
+        $env['SQLARIS_LAYOUT'] = $this->layout;
         $this->views = sys_get_temp_dir().'/sqlaris-test-views-'.$port.'.json';
         $env['SQLARIS_VIEWS'] = $this->views;
-        $this->process = proc_open([PHP_BINARY, '-S', "127.0.0.1:{$port}", 'router.php'], [
+        $this->process = proc_open([PHP_BINARY, '-d', 'auto_prepend_file='.__DIR__.'/coverage.php', '-S', "127.0.0.1:{$port}", 'router.php'], [
             0 => ['pipe', 'r'],
             1 => ['file', sys_get_temp_dir().'/sqlaris-test-server.log', 'a'],
             2 => ['file', sys_get_temp_dir().'/sqlaris-test-server.log', 'a'],
@@ -117,7 +147,7 @@ final class TestServer
         proc_terminate($this->process);
         proc_close($this->process);
 
-        foreach ([$this->views, $this->views.'.lock'] as $file) {
+        foreach ([$this->views, $this->views.'.lock', $this->layout, $this->layout.'.tmp'] as $file) {
             if (is_file($file)) {
                 unlink($file);
             }
@@ -128,6 +158,9 @@ final class TestServer
 /** A browser of sorts: keeps the session cookie and sends what the page sends. */
 final class TestClient
 {
+    /** The actions that answered 200 to any client, so the run can tell which were never made to work. */
+    public static array $succeeded = [];
+
     private string $cookie = '';
 
     public function __construct(public readonly TestServer $server) {}
@@ -185,6 +218,10 @@ final class TestClient
     {
         $response = $this->request('POST', '/api.php', json_encode(['action' => $action] + $payload),
             $headers + ['Content-Type' => 'application/json', 'X-Sqlaris' => '1']);
+
+        if ($response['status'] === 200) {
+            self::$succeeded[$action] = true;
+        }
 
         return $response + ['json' => json_decode($response['body'], true)];
     }

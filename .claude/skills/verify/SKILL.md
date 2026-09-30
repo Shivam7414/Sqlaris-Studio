@@ -29,6 +29,11 @@ php tests/php/run.php
 
 The Stop hook runs these too, but run them yourself so you see the output.
 
+For new behaviour or a bug fix, there must be a test that failed before the change and
+passes after it. If you wrote the test after the code, take the change out (or break the
+line it guards), run the test, see it fail, and put the change back. A test you have
+never seen fail may not test anything.
+
 ## 3. The API against real databases
 
 Needed when anything in `api.php` or `src/` changed. Look at the end of the PHP test
@@ -72,7 +77,8 @@ Go through the diff with CLAUDE.md next to it:
 - Works on both PostgreSQL and MySQL/MariaDB, or the difference is said in the UI and the
   README.
 - No PHP newer than 8.1, no SQL that PostgreSQL 12 or MySQL 8.0 lack.
-- No new dependency, no build step, nothing edited in `assets/vendor/`.
+- No new runtime dependency, no build step, nothing edited in `assets/vendor/`. A dev-only
+  test tool is fine if the app and the unit and API suites still run without it.
 - UI text follows `.claude/skills/build-ui/copy.md`. Read every new string out loud.
 - README updated if behaviour it describes changed (features, shortcuts, options, the
   MySQL differences).

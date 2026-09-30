@@ -17,6 +17,7 @@ jobs:
             postgres: '12'
             mysql: 'mysql:8.0'
           - php: '8.4'
+            coverage: pcov
             postgres: '18'
             mysql: 'mariadb:11'
 
@@ -46,7 +47,8 @@ jobs:
         with:
           php-version: ${{ matrix.php }}
           extensions: pdo_pgsql, pdo_mysql, curl
-          coverage: none
+          coverage: ${{ matrix.coverage || 'none' }}
+          ini-values: pcov.directory=${{ github.workspace }}
 
       - uses: actions/setup-node@v4
         with:
@@ -55,6 +57,10 @@ jobs:
       - name: Diagram tests
         run: node --test
 
+      - name: Coverage folder
+        if: matrix.coverage
+        run: mkdir -p "$RUNNER_TEMP/coverage"
+
       - name: PHP tests
         run: php tests/php/run.php
         env:
@@ -62,6 +68,11 @@ jobs:
           TEST_PGSQL_PASSWORD: test
           TEST_MYSQL_HOST: 127.0.0.1
           TEST_MYSQL_PASSWORD: test
+          COVERAGE_DIR: ${{ matrix.coverage && format('{0}/coverage', runner.temp) || '' }}
+
+      - name: PHP line coverage
+        if: matrix.coverage
+        run: php tests/php/coverage-report.php "$RUNNER_TEMP/coverage"
 
   docker:
     name: Docker image

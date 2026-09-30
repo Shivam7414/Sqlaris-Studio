@@ -24,7 +24,8 @@ Check, in this order:
    way round) without saying so. SQL that PostgreSQL 12 or MySQL 8.0 lack. PHP newer
    than 8.1.
 4. **Tests.** Data-changing behaviour without a test in `tests/php/api.test.php` that
-   reads the database directly. Tests that were weakened to pass.
+   reads the database directly. Tests that were weakened to pass. A test that would still
+   pass with the change taken out, because it checks something the change does not affect.
 5. **Front-end safety.** `innerHTML` or similar with anything that is not fixed markup.
 6. **Looks.** Raw colours or radii instead of tokens; missing light-theme values; new
    gradients, glows, emoji, icon-on-every-line, cards in cards, more than one primary

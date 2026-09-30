@@ -33,8 +33,12 @@ not a pass for a change to `src/` or `api.php`: say plainly that the API tests d
 
 ## Rules that are not negotiable
 
-- No build step, no package manager, no new runtime dependency. Nothing that needs
-  `npm install` or `composer install`.
+- The app itself has no build step and no runtime dependency. Nothing it needs to run
+  may come from `npm install` or `composer install`, and nothing the page loads may be
+  built. Third-party code the page uses goes through `src/libraries.php`.
+- Tools for testing may be dev-only packages (a browser driver in `package.json`
+  `devDependencies`, PCOV or Xdebug for coverage). The app must still run from a plain
+  checkout without them, and the unit and API suites must keep running without them too.
 - Table and column names come from the catalog (`dbv_table`, `dbv_column`), never from the
   request. Unknown names are refused before any SQL is written.
 - Every value is bound as a parameter. Sort directions, filter operators and anything else
@@ -54,14 +58,36 @@ not a pass for a change to `src/` or `api.php`: say plainly that the API tests d
    already does the job. This codebase has one for most things (`toast`, `confirmBox`,
    `confirmByName`, `openModal`, `askText`, `nameForm`, `menuList`, `segmented`,
    `skeleton`, `stat`, `searchable`, `dateBox`). Reuse before adding.
-2. Match the file you are in: its naming (`dbv_` prefix in PHP, `declare(strict_types=1)`),
+2. For a change that touches more than one file, write down the steps and what each one
+   needs before editing anything. For API work the order is in the `add-api-action` skill.
+3. Tests first. Write the test that shows the change is needed and watch it fail for that
+   reason. Then write the least code that makes it pass, then tidy up while it stays green.
+   For a bug, the first test reproduces it. For a feature, have the `test-writer` agent
+   write the tests: it runs on a different model and works from what the feature should
+   do, not from your code.
+4. Match the file you are in: its naming (`dbv_` prefix in PHP, `declare(strict_types=1)`),
    its comment density, and its habit of explaining *why* in plain sentences.
-3. After each change, check it. Hooks lint every file you edit and run both test suites
+5. After each change, check it. Hooks lint every file you edit and run both test suites
    when you stop; a failing check blocks you from finishing. Fix the cause, never the test.
-4. Before saying something is done, run the `verify` skill. For UI work that includes
+6. Before saying something is done, run the `verify` skill. For UI work that includes
    looking at the page in a browser in both the dark and the light theme.
-5. Report what you checked and what you could not check, separately. "Tests pass" only
+7. Report what you checked and what you could not check, separately. "Tests pass" only
    when you saw them pass in this session.
+
+## What the tests cover
+
+- **Unit:** `tests/php/unit.test.php` for PHP with no database, `tests/diagram.test.js`
+  for the diagram layouts.
+- **Integration:** `tests/php/api.test.php` calls `api.php` over HTTP, signed in, against
+  real PostgreSQL and MySQL/MariaDB servers, and reads the effect back through PDO.
+- **In the browser:** nothing automated yet. Until there is, the `verify` skill's browser
+  step is the check for flows on the page. Browser tests will be a separate suite with its
+  own command, so `node --test` must not pick them up.
+- **Coverage:** CI measures PHP line coverage with PCOV on the PHP 8.4 job
+  (`tests/php/coverage.php`, report by `tests/php/coverage-report.php`). Locally it needs
+  PCOV and `COVERAGE_DIR` set; without them nothing is measured. Every action in `api.php`
+  must also succeed in at least one API test; the run fails and names any that did not. `node --test --experimental-test-coverage` shows `diagram.js`:
+  its layouts are covered, and `mount()` is DOM code that Node cannot run.
 
 ## UI and the words on it
 

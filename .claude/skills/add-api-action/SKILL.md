@@ -9,6 +9,18 @@ Work through these in order. Read an existing action that is close to the new on
 (for a write, `dbv_action_update` or `dbv_action_truncate`; for a read,
 `dbv_action_structure` or `dbv_action_health`).
 
+## 0. Tests, red
+
+Before any code, hand the `test-writer` agent what the action should do: its name, what
+it takes, what it changes, what it refuses and with what message. It writes the tests in
+`tests/php/api.test.php` (see step 5 for what they must cover) and runs them.
+
+Run them yourself too, against a real server (see the `verify` skill, step 3), and see
+each one fail because the action is not there yet: `Unknown action.`, or the effect is
+missing. A test that fails for another reason is broken, and one that passes already
+tests nothing new. Only then start on the code, and write no more of it than the tests
+need. When they pass, tidy up with them still green.
+
 ## 1. Driver
 
 If the SQL differs between PostgreSQL and MySQL/MariaDB, add an `abstract` method to
@@ -50,9 +62,10 @@ skill for anything it shows. After a change, refresh what the change affects
 (`afterTableChange`, `loadRows`, `bumpCount`) and give a toast that says what happened,
 with Undo when it can be undone.
 
-## 5. Tests
+## 5. Tests, green
 
-In `tests/php/api.test.php`:
+What the tests from step 0 must cover, in `tests/php/api.test.php`. Check them against
+this list now that the code is there, and add what is missing, red first as before:
 
 - The normal request, then read the database directly through `$pdo` to confirm the
   effect. The viewer does not get to vouch for itself.
@@ -64,7 +77,8 @@ In `tests/php/api.test.php`:
 Pure logic without a database goes in `tests/php/unit.test.php`.
 
 Run `php tests/php/run.php` against at least one real server (see the `verify` skill,
-step 3) before calling it done.
+step 3) before calling it done. The run fails if the new action never succeeded in a
+test, so a route with only refusals tested does not get through.
 
 ## 6. README
 

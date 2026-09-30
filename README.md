@@ -402,8 +402,10 @@ TEST_MYSQL_HOST=127.0.0.1
 TEST_MYSQL_PASSWORD=secret
 ```
 
-Each run makes a database called `sqlaris_test`, fills it, and drops it at the end, so use
-a server where that name is free. GitHub Actions runs both suites on every push, with
+Each run makes a database called `sqlaris_test`, fills it, and drops it at the end. The
+tests of making and dropping a database also use `sqlaris_test_extra`. Use a server where
+both names are free. Every action in `api.php` must work in at least one test, or the run
+fails and names it. GitHub Actions runs both suites on every push, with
 PHP 8.1 and PostgreSQL 12 and MySQL 8.0, and with PHP 8.4 and PostgreSQL 18 and
 MariaDB 11. It also builds the image and signs in to the demo.
 
@@ -411,10 +413,14 @@ MariaDB 11. It also builds the image and signs in to the demo.
 
 Issues and pull requests are welcome. A few things that keep the project the way it is:
 
-- No build step and no package manager. The page loads `assets/app.js` as it is.
+- No build step and no runtime dependency. The page loads `assets/app.js` as it is, and
+  the viewer runs from a plain checkout. Tools used only for testing may be dev-only
+  packages, as long as the app and the two test suites above still run without them.
 - New libraries go in `assets/vendor` through `src/libraries.php`, with their license file.
 - Anything that changes data should work on both PostgreSQL and MySQL, or say clearly
   where it does not, and come with a test in `tests/php/api.test.php`.
+- Write that test first and see it fail, then write the change. For a bug, the test
+  reproduces the bug.
 - Run both test suites before sending a change.
 
 ## Bundled libraries

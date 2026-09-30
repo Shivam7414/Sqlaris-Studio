@@ -16,6 +16,11 @@ if ($rel === null) {
 }
 
 $decision = match (true) {
+    // The tests are written apart from the code they check, so the agent that writes them stays out of the code.
+    ($input['agent_type'] ?? '') === 'test-writer' && ! str_starts_with($rel, 'tests/') => [
+        'deny',
+        'The test-writer agent only edits files under tests/. Say what else the test needs and let the main agent make it.',
+    ],
     in_array($rel, ['.env', 'config.php', 'layout.json', 'tests/.env'], true) => [
         'ask',
         "{$rel} is the user's own settings file and git ignores it. Only change it when they asked for exactly this.",

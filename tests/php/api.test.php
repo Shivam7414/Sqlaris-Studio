@@ -56,9 +56,14 @@ const FIXTURES = [
 
 /**
  * The tests for one server. $pdo is a connection of the tests' own to the
- * test database, $db the id the page uses for it.
+ * test database, $db the id the page uses for it. $connect opens another
+ * connection of the tests' own, to any database on the server, and $signIn
+ * gives a second browser that is signed in.
+ *
+ * @param  callable(string): PDO  $connect
+ * @param  callable(): TestClient  $signIn
  */
-function api_tests(string $tag, string $driver, TestClient $c, string $db, PDO $pdo): void
+function api_tests(string $tag, string $driver, TestClient $c, string $db, PDO $pdo, callable $connect, callable $signIn): void
 {
     $q = $driver === 'pgsql' ? fn ($n) => '"'.str_replace('"', '""', $n).'"' : fn ($n) => '`'.str_replace('`', '``', $n).'`';
     $count = fn (string $table = 'items') => (int) $pdo->query('select count(*) from '.$q($table))->fetchColumn();
@@ -70,6 +75,83 @@ function api_tests(string $tag, string $driver, TestClient $c, string $db, PDO $
 
         return array_map(fn ($row) => $row[$at], $answer['rows']);
     };
+
+    // What the database says about itself, for the tests that make and drop things of their own.
+    $schema = $driver === 'pgsql' ? "'public'" : 'database()';
+    $tablesOf = fn (PDO $on, bool $baseOnly = false): array => $on->query("select table_name as name from information_schema.tables where table_schema = {$schema}"
+        .($baseOnly ? " and table_type = 'BASE TABLE'" : '').' order by table_name')->fetchAll(PDO::FETCH_COLUMN);
+    $hasTable = fn (string $name): bool => in_array($name, $tablesOf($pdo), true);
+    $columnsOf = function (string $table) use ($pdo, $schema): array {
+        $read = $pdo->prepare("select column_name as name from information_schema.columns where table_schema = {$schema} and table_name = ? order by ordinal_position");
+        $read->execute([$table]);
+
+        return $read->fetchAll(PDO::FETCH_COLUMN);
+    };
+    $columnInfo = function (string $table, string $name) use ($pdo, $schema): ?array {
+        $read = $pdo->prepare("select is_nullable as nullable, data_type as type, character_maximum_length as len from information_schema.columns
+            where table_schema = {$schema} and table_name = ? and column_name = ?");
+        $read->execute([$table, $name]);
+
+        return $read->fetch(PDO::FETCH_ASSOC) ?: null;
+    };
+    $commentOf = function (string $table, string $column) use ($pdo, $driver): ?string {
+        $read = $driver === 'pgsql'
+            ? $pdo->prepare('select col_description(a.attrelid, a.attnum) from pg_attribute a where a.attrelid = ?::regclass and a.attname = ?')
+            : $pdo->prepare('select column_comment from information_schema.columns where table_schema = database() and table_name = ? and column_name = ?');
+        $read->execute([$driver === 'pgsql' ? 'public.'.$table : $table, $column]);
+        $comment = $read->fetchColumn();
+
+        return $comment === false || $comment === '' ? null : $comment;
+    };
+    $indexesOf = function (PDO $on, string $table) use ($driver): array {
+        $read = $on->prepare($driver === 'pgsql'
+            ? "select indexname as name from pg_indexes where schemaname = 'public' and tablename = ?"
+            : 'select distinct index_name as name from information_schema.statistics where table_schema = database() and table_name = ?');
+        $read->execute([$table]);
+
+        return $read->fetchAll(PDO::FETCH_COLUMN);
+    };
+    $dropTables = function (string ...$names) use ($pdo, $q): void {
+        foreach ($names as $name) {
+            $pdo->exec('drop table if exists '.$q($name));
+        }
+    };
+    // Whether the server has a database of that name. It asks over a connection of its own, so it still works
+    // after a test has ended $pdo.
+    $hasDatabase = function (string $name) use ($connect, $driver): bool {
+        $ask = $connect(TEST_DATABASE)->prepare($driver === 'pgsql'
+            ? 'select count(*) from pg_database where datname = ?'
+            : 'select count(*) from information_schema.schemata where schema_name = ?');
+        $ask->execute([$name]);
+
+        return (int) $ask->fetchColumn() > 0;
+    };
+    // How many sessions the server has under this id.
+    $sessions = fn (int $id): int => (int) $pdo->query($driver === 'pgsql'
+        ? "select count(*) from pg_stat_activity where pid = {$id}"
+        : "select count(*) from information_schema.processlist where id = {$id}")->fetchColumn();
+    $sessionId = fn (PDO $on): int => (int) $on->query($driver === 'pgsql' ? 'select pg_backend_pid()' : 'select connection_id()')->fetchColumn();
+    // Rows of the tests' own in items, put in through $pdo and taken out again by name, so the fixtures stay as they are.
+    $addItems = function (string ...$names) use ($pdo): array {
+        $ids = [];
+
+        foreach ($names as $name) {
+            $pdo->prepare('insert into items (name) values (?)')->execute([$name]);
+            $find = $pdo->prepare('select id from items where name = ?');
+            $find->execute([$name]);
+            $ids[$name] = (int) $find->fetchColumn();
+        }
+
+        return $ids;
+    };
+    $removeItems = function (array $names) use ($pdo): void {
+        $delete = $pdo->prepare('delete from items where name = ?');
+
+        foreach ($names as $name) {
+            $delete->execute([$name]);
+        }
+    };
+    $present = fn (array $ids): array => array_map('intval', $pdo->query('select id from items where id in ('.implode(', ', array_map('intval', $ids)).') order by id')->fetchAll(PDO::FETCH_COLUMN));
 
     // Reading
 
@@ -298,6 +380,89 @@ function api_tests(string $tag, string $driver, TestClient $c, string $db, PDO $
         same($before + 2, $count());
     });
 
+    // The next tests work on rows of their own, put in through $pdo and taken out again, because the tests
+    // after them read the fixture rows by their ids.
+
+    test("{$tag} a delete removes the rows whose keys are sent, and the rows that point at them", function () use ($c, $items, $pdo, $count, $addItems, $removeItems, $present) {
+        $names = ['probe gone one', 'probe gone two', 'probe kept one', 'probe kept two'];
+        $ids = $addItems(...$names);
+
+        try {
+            // Tags 9001 to 9005: two on the first row to go, one on the second, one on each row that stays.
+            $addTag = $pdo->prepare('insert into item_tags (id, item_id, tag) values (?, ?, ?)');
+
+            foreach ([[9001, 'probe gone one'], [9002, 'probe gone one'], [9003, 'probe gone two'], [9004, 'probe kept one'], [9005, 'probe kept two']] as [$tagId, $owner]) {
+                $addTag->execute([$tagId, $ids[$owner], 'probe']);
+            }
+
+            $itemsBefore = $count();
+            $tagsBefore = $count('item_tags');
+
+            $r = $c->ok('delete', $items + ['keys' => [['id' => (string) $ids['probe gone one']], ['id' => (string) $ids['probe gone two']]]]);
+
+            same(2, $r['deleted']);
+            same([$ids['probe kept one'], $ids['probe kept two']], $present($ids), 'only the two rows that were sent are gone');
+            same([9004, 9005], array_map('intval', $pdo->query('select id from item_tags where id between 9001 and 9005 order by id')->fetchAll(PDO::FETCH_COLUMN)),
+                'the tags of the deleted rows went with them, and the others stayed');
+            same($itemsBefore - 2, $count());
+            same($tagsBefore - 3, $count('item_tags'));
+            same(2, (int) $pdo->query('select count(*) from item_tags where item_id = 1')->fetchColumn(), 'the tags of a row that was not sent are as they were');
+        } finally {
+            $removeItems($names);
+        }
+    });
+
+    test("{$tag} a delete that names a row that is gone deletes none of the rows", function () use ($c, $items, $count, $addItems, $removeItems, $present) {
+        $names = ['probe stays one', 'probe stays two'];
+        $ids = $addItems(...$names);
+
+        try {
+            $before = $count();
+            // The good row comes first, so a delete that had already run it would show.
+            $c->refused('delete', $items + ['keys' => [['id' => (string) $ids['probe stays one']], ['id' => '999999'], ['id' => (string) $ids['probe stays two']]]], 'not there any more');
+
+            same($before, $count());
+            same(array_values($ids), $present($ids));
+        } finally {
+            $removeItems($names);
+        }
+    });
+
+    test("{$tag} a paste over several rows changes each of them and nothing else", function () use ($c, $items, $pdo, $addItems, $removeItems) {
+        $names = ['probe each one', 'probe each two', 'probe each three', 'probe bystander'];
+        $ids = $addItems(...$names);
+        $snapshot = fn (): array => array_column($pdo->query('select id, name, note, qty from items order by id')->fetchAll(PDO::FETCH_ASSOC), null, 'id');
+        $key = fn (string $name): array => ['id' => (string) $ids[$name]];
+        $shown = fn (array $row): array => [$row['name'], $row['note'], (string) $row['qty']];
+
+        try {
+            $before = $snapshot();
+
+            $r = $c->ok('update_each', $items + ['items' => [
+                ['key' => $key('probe each one'), 'changes' => ['qty' => '11']],
+                ['key' => $key('probe each two'), 'changes' => ['note' => 'second', 'qty' => '12']],
+                ['key' => $key('probe each three'), 'changes' => ['name' => 'probe each 3']],
+            ]]);
+            $after = $snapshot();
+
+            same(3, count($r['rows']), 'the answer has the three rows');
+            same(['probe each one', null, '11'], $shown($after[$ids['probe each one']]));
+            same(['probe each two', 'second', '12'], $shown($after[$ids['probe each two']]));
+            same(['probe each 3', null, '0'], $shown($after[$ids['probe each three']]));
+            same(array_keys($before), array_keys($after), 'no row was added or removed');
+
+            foreach ($before as $id => $row) {
+                if (! in_array($id, [$ids['probe each one'], $ids['probe each two'], $ids['probe each three']], true)) {
+                    same($row, $after[$id], "row {$id} was not part of the paste, so it stays as it was");
+                }
+            }
+
+            $c->refused('update_each', $items + ['items' => []], 'between 1 and 1000');
+        } finally {
+            $removeItems([...$names, 'probe each 3']);
+        }
+    });
+
     test("{$tag} emptying or dropping needs the exact name typed back", function () use ($c, $db, $count) {
         $scratch = ['db' => $db, 'table' => ['name' => 'scratch']];
         $c->refused('truncate', $scratch + ['confirm' => 'Scratch'], 'Type the table name');
@@ -332,6 +497,198 @@ function api_tests(string $tag, string $driver, TestClient $c, string $db, PDO $
             ? "select count(*) from information_schema.columns where table_name = 'items' and column_name = 'extra'"
             : "select count(*) from information_schema.columns where table_schema = database() and table_name = 'items' and column_name = 'extra'";
         same(0, (int) $pdo->query($has)->fetchColumn(), 'a preview must not add the column');
+    });
+
+    // Tables and columns. Each test makes the tables it needs through $pdo and drops what it leaves.
+
+    test("{$tag} renaming a table moves its rows to the new name", function () use ($c, $db, $pdo, $count, $hasTable, $dropTables) {
+        $dropTables('probe_before', 'probe_after');
+        $pdo->exec('create table probe_before (id integer primary key, label varchar(50))');
+        $pdo->exec("insert into probe_before values (1, 'one'), (2, 'two'), (3, 'three')");
+
+        try {
+            $r = $c->ok('rename_table', ['db' => $db, 'table' => ['name' => 'probe_before'], 'to' => 'probe_after']);
+
+            same('probe_after', $r['name']);
+            same([false, true], [$hasTable('probe_before'), $hasTable('probe_after')], 'the old name is gone and the new one is there');
+            same([1 => 'one', 2 => 'two', 3 => 'three'], $pdo->query('select id, label from probe_after order by id')->fetchAll(PDO::FETCH_KEY_PAIR));
+
+            // A name that is taken is refused, and the table is where it was, with its rows.
+            $before = $count();
+            $c->refused('rename_table', ['db' => $db, 'table' => ['name' => 'probe_after'], 'to' => 'items'], 'already exists');
+            same(true, $hasTable('probe_after'));
+            same(3, $count('probe_after'));
+            same($before, $count());
+        } finally {
+            $dropTables('probe_before', 'probe_after');
+        }
+    });
+
+    test("{$tag} a table or view is dropped only when its name is typed back exactly", function () use ($c, $db, $pdo, $hasTable, $dropTables) {
+        $dropTables('probe_drop');
+        $pdo->exec('create table probe_drop (id integer primary key)');
+        $pdo->exec('insert into probe_drop values (1)');
+        $pdo->exec('create view probe_drop_view as select id from probe_drop');
+        $table = ['db' => $db, 'table' => ['name' => 'probe_drop']];
+        $view = ['db' => $db, 'table' => ['name' => 'probe_drop_view']];
+
+        try {
+            $c->refused('drop_table', $table + ['confirm' => 'PROBE_DROP'], 'Type the table name');
+            $c->refused('drop_table', $view + ['confirm' => 'probe_drop'], 'Type the table name');
+            $c->refused('drop_table', $table, 'Type the table name');
+            same([true, true], [$hasTable('probe_drop'), $hasTable('probe_drop_view')], 'a wrong name drops nothing');
+
+            $c->ok('drop_table', $view + ['confirm' => 'probe_drop_view']);
+            same([true, false], [$hasTable('probe_drop'), $hasTable('probe_drop_view')], 'the view is gone, and the table under it is not');
+
+            $c->ok('drop_table', $table + ['confirm' => 'probe_drop']);
+            same(false, $hasTable('probe_drop'));
+        } finally {
+            $pdo->exec('drop view if exists probe_drop_view');
+            $dropTables('probe_drop');
+        }
+    });
+
+    // The table the copies are made from has what a copy has to bring over: a numbered key, a default, a check
+    // and a column the database works out itself. Its ids skip from 1 to 5, so a copy that counted its rows
+    // would number the next one wrong.
+    $probeSource = [
+        'pgsql' => "create table probe_src (id integer generated by default as identity primary key, label varchar(50) not null default 'x',
+            qty integer not null default 0 check (qty >= 0), double_qty integer generated always as (qty * 2) stored)",
+        'mysql' => "create table probe_src (id int auto_increment primary key, label varchar(50) not null default 'x',
+            qty int not null default 0 check (qty >= 0), double_qty int as (qty * 2) stored)",
+    ][$driver];
+
+    test("{$tag} a copy of a table has the same columns and rows, and its numbering carries on", function () use ($c, $db, $pdo, $q, $probeSource, $hasTable, $columnsOf, $dropTables) {
+        $dropTables('probe_src', 'probe_copy');
+        $pdo->exec($probeSource);
+        $pdo->exec("insert into probe_src (id, label, qty) values (1, 'one', 1), (5, 'five', 5)");
+        $read = fn (string $table): array => $pdo->query('select id, label, qty, double_qty from '.$q($table).' order by id')->fetchAll(PDO::FETCH_NUM);
+
+        try {
+            $r = $c->ok('copy_table', ['db' => $db, 'table' => ['name' => 'probe_src'], 'to' => 'probe_copy']);
+
+            same('probe_copy', $r['name']);
+            same(true, $hasTable('probe_copy'));
+            same($columnsOf('probe_src'), $columnsOf('probe_copy'), 'the same columns, in the same order');
+            same(2, count($read('probe_copy')), 'the rows came along');
+            same($read('probe_src'), $read('probe_copy'), 'the same rows, the computed column included');
+            same(2, count($read('probe_src')), 'the original still has its rows');
+
+            $pdo->exec("insert into probe_copy (label) values ('next')");
+            $next = (int) $pdo->query("select id from probe_copy where label = 'next'")->fetchColumn();
+            check($next > 5, "a new row in the copy is numbered after the highest key that was copied, and got {$next}");
+        } finally {
+            $dropTables('probe_src', 'probe_copy');
+        }
+    });
+
+    test("{$tag} a copy without rows is empty, and keeps the columns, the default and the key", function () use ($c, $db, $pdo, $count, $probeSource, $hasTable, $columnsOf, $dropTables) {
+        $dropTables('probe_src', 'probe_empty');
+        $pdo->exec($probeSource);
+        $pdo->exec("insert into probe_src (id, label, qty) values (1, 'one', 1), (5, 'five', 5)");
+
+        try {
+            $c->ok('copy_table', ['db' => $db, 'table' => ['name' => 'probe_src'], 'to' => 'probe_empty', 'rows' => false]);
+
+            same(true, $hasTable('probe_empty'));
+            same(0, $count('probe_empty'));
+            same($columnsOf('probe_src'), $columnsOf('probe_empty'));
+            same(2, $count('probe_src'), 'the original still has its rows');
+
+            $pdo->exec('insert into probe_empty (id) values (7)');
+            same('x', $pdo->query('select label from probe_empty where id = 7')->fetchColumn(), 'the default came along');
+            fails(fn () => $pdo->exec('insert into probe_empty (id) values (7)'));
+            fails(fn () => $pdo->exec('insert into probe_empty (id, qty) values (8, -1)'));
+        } finally {
+            $dropTables('probe_src', 'probe_empty');
+        }
+    });
+
+    test("{$tag} a copy onto a name that is taken, or of a view, is refused and makes nothing", function () use ($c, $db, $count, $hasTable) {
+        $before = $count();
+
+        $c->refused('copy_table', ['db' => $db, 'table' => ['name' => 'scratch'], 'to' => 'items'], 'already exists');
+        same($before, $count());
+
+        $c->refused('copy_table', ['db' => $db, 'table' => ['name' => 'cheap_items'], 'to' => 'probe_from_view'], 'Only a table can be copied');
+        same(false, $hasTable('probe_from_view'));
+    });
+
+    test("{$tag} saving a new column adds it, with its type, default and comment", function () use ($c, $db, $pdo, $columnsOf, $columnInfo, $commentOf, $dropTables) {
+        $dropTables('probe_add_col');
+        $pdo->exec('create table probe_add_col (id integer primary key)');
+        $pdo->exec('insert into probe_add_col values (1)');
+
+        try {
+            $r = $c->ok('save_column', ['db' => $db, 'table' => ['name' => 'probe_add_col'], 'run' => true, 'spec' => [
+                'name' => 'label', 'type' => 'varchar(20)', 'nullable' => false,
+                'default' => ['mode' => 'text', 'value' => "it's here"], 'comment' => 'a short label',
+            ]]);
+
+            check(count($r['sql']) >= 1, 'the answer says what ran');
+            same(['id', 'label'], $columnsOf('probe_add_col'));
+            $info = $columnInfo('probe_add_col', 'label');
+            same(['NO', 20], [$info['nullable'] ?? null, (int) ($info['len'] ?? 0)], 'not null, and the type that was asked for');
+            same('a short label', $commentOf('probe_add_col', 'label'));
+            same("it's here", $pdo->query('select label from probe_add_col where id = 1')->fetchColumn(), 'the row that was there has the default');
+
+            $pdo->exec('insert into probe_add_col (id) values (2)');
+            same("it's here", $pdo->query('select label from probe_add_col where id = 2')->fetchColumn(), 'a new row gets the default, quote and all');
+        } finally {
+            $dropTables('probe_add_col');
+        }
+    });
+
+    test("{$tag} saving a changed column changes that one, and its rows keep their values", function () use ($c, $db, $pdo, $columnsOf, $columnInfo, $commentOf, $dropTables) {
+        $dropTables('probe_change_col');
+        $pdo->exec('create table probe_change_col (id integer primary key, qty integer)');
+        $pdo->exec('insert into probe_change_col values (1, 5), (2, 6)');
+        $change = fn (array $spec): array => $c->ok('save_column', ['db' => $db, 'table' => ['name' => 'probe_change_col'], 'column' => $spec['from'], 'run' => true, 'spec' => array_diff_key($spec, ['from' => 1])]);
+        $values = fn (string $column): array => array_map('intval', $pdo->query("select id, {$column} from probe_change_col order by id")->fetchAll(PDO::FETCH_KEY_PAIR));
+
+        try {
+            $r = $change(['from' => 'qty', 'name' => 'qty', 'type' => 'integer', 'nullable' => false, 'default' => ['mode' => 'sql', 'value' => '9'], 'comment' => 'how many']);
+            check(count($r['sql']) >= 1, 'the answer says what ran');
+            same('NO', $columnInfo('probe_change_col', 'qty')['nullable'] ?? null, 'the column is not null now');
+            same('how many', $commentOf('probe_change_col', 'qty'));
+            $pdo->exec('insert into probe_change_col (id) values (3)');
+            same([1 => 5, 2 => 6, 3 => 9], $values('qty'), 'a new row gets the new default, and the old rows are as they were');
+            fails(fn () => $pdo->exec('insert into probe_change_col (id, qty) values (4, null)'));
+
+            $change(['from' => 'qty', 'name' => 'qty', 'type' => 'bigint', 'nullable' => false, 'default' => ['mode' => 'sql', 'value' => '9'], 'comment' => 'how many']);
+            same('bigint', $columnInfo('probe_change_col', 'qty')['type'] ?? null, 'the type changed');
+            $pdo->exec('insert into probe_change_col (id) values (4)');
+            same([1 => 5, 2 => 6, 3 => 9, 4 => 9], $values('qty'), 'the values were converted, and the default is still there');
+
+            $change(['from' => 'qty', 'name' => 'amount', 'type' => 'bigint', 'nullable' => false, 'default' => ['mode' => 'sql', 'value' => '9'], 'comment' => 'how many']);
+            same(['id', 'amount'], $columnsOf('probe_change_col'), 'the column has its new name, in the same place');
+            same([1 => 5, 2 => 6, 3 => 9, 4 => 9], $values('amount'));
+            same('NO', $columnInfo('probe_change_col', 'amount')['nullable'] ?? null, 'a rename keeps the rest of the column as it was');
+        } finally {
+            $dropTables('probe_change_col');
+        }
+    });
+
+    test("{$tag} dropping a column needs its name typed back, and removes only that column", function () use ($c, $db, $pdo, $columnsOf, $dropTables) {
+        $dropTables('probe_drop_col');
+        $pdo->exec('create table probe_drop_col (id integer primary key, keep_me varchar(20), drop_me varchar(20))');
+        $pdo->exec("insert into probe_drop_col values (1, 'kept', 'gone')");
+        $table = ['db' => $db, 'table' => ['name' => 'probe_drop_col']];
+
+        try {
+            $c->refused('drop_column', $table + ['column' => 'drop_me', 'confirm' => 'DROP_ME'], 'Type the column name');
+            $c->refused('drop_column', $table + ['column' => 'drop_me'], 'Type the column name');
+            $c->refused('drop_column', $table + ['column' => 'no_such_column', 'confirm' => 'no_such_column'], 'has no column');
+            same(['id', 'keep_me', 'drop_me'], $columnsOf('probe_drop_col'), 'a wrong name drops nothing');
+
+            $c->ok('drop_column', $table + ['column' => 'drop_me', 'confirm' => 'drop_me']);
+
+            same(['id', 'keep_me'], $columnsOf('probe_drop_col'));
+            same('kept', $pdo->query('select keep_me from probe_drop_col where id = 1')->fetchColumn(), 'the other columns keep their values');
+        } finally {
+            $dropTables('probe_drop_col');
+        }
     });
 
     // The SQL tab
@@ -404,6 +761,162 @@ function api_tests(string $tag, string $driver, TestClient $c, string $db, PDO $
         $r = $c->ok('sql', ['db' => $db, 'sql' => 'select name from items where id <= 3 order by id']);
         same([['apple'], ['banana'], ['cherry']], $r['rows']);
         same(false, $r['committed']);
+    });
+
+    // Sessions
+
+    test("{$tag} stopping a session leaves it open, and ending it closes it", function () use ($c, $db, $connect, $sessions, $sessionId) {
+        $other = $connect(TEST_DATABASE);
+        $id = $sessionId($other);
+        same(1, $sessions($id), 'the server lists the session the test opened');
+
+        // Nothing runs in it, so stopping its query leaves the session as it is.
+        $c->ok('stop', ['db' => $db, 'id' => $id, 'kill' => false]);
+        same(1, $sessions($id), 'stopping a query does not end the session');
+        same('1', (string) $other->query('select 1')->fetchColumn());
+
+        $c->ok('stop', ['db' => $db, 'id' => $id, 'kill' => true]);
+
+        // The server takes a moment to close it.
+        for ($i = 0; $i < 50 && $sessions($id) > 0; $i++) {
+            usleep(100000);
+        }
+
+        same(0, $sessions($id), 'the server no longer lists the session');
+        fails(fn () => $other->query('select 1'));
+    });
+
+    test("{$tag} a session that has ended, or that is in another database, is not stopped", function () use ($c, $db, $connect, $driver, $sessionId) {
+        $c->refused('stop', ['db' => $db, 'id' => 2000000000, 'kill' => true], 'ended already');
+        $c->refused('stop', ['db' => $db, 'kill' => true], 'ended already');
+
+        // The page is open on one database, and that is as far as its power over sessions goes.
+        $elsewhere = $connect($driver === 'pgsql' ? 'postgres' : 'mysql');
+        $c->refused('stop', ['db' => $db, 'id' => $sessionId($elsewhere), 'kill' => true], 'ended already');
+        same('1', (string) $elsewhere->query('select 1')->fetchColumn(), 'the session in the other database is still there');
+    });
+
+    // The list of databases, the sidebar layout and signing out
+
+    test("{$tag} the list of databases has a group with the test database in it", function () use ($c, $db, $driver) {
+        $r = $c->ok('databases');
+        $listed = array_merge(...array_column($r['groups'], 'items'));
+        $found = array_values(array_filter($listed, fn ($item) => $item['id'] === $db));
+
+        same(1, count($found), 'the test database is listed once: '.json_encode($r['groups']));
+        same([TEST_DATABASE, $driver], [$found[0]['name'], $found[0]['driver']]);
+
+        // The config lists two names, so no other database on the server shows, the system ones least of all.
+        foreach ($listed as $item) {
+            check(in_array($item['name'], [TEST_DATABASE, TEST_EXTRA_DATABASE], true), "{$item['name']} is not on the list in config.php");
+        }
+
+        check(isset($r['settings']['audit_columns']) && isset($r['layout']['groups']), 'the settings and the layout come with the list');
+    });
+
+    test("{$tag} the sidebar layout is saved to its file and comes back with the next list, cleaned", function () use ($c, $db) {
+        $mine = [
+            'groups' => [
+                ['id' => 'u:probe', 'label' => 'Probe', 'items' => [$db, $db, 42, '']],
+                ['id' => 'not-mine', 'label' => 'A group without the u: id', 'items' => [$db]],
+            ],
+            'order' => ['u:probe', $db],
+            'hidden' => [$db],
+            'folded' => ['u:probe' => true],
+        ];
+
+        try {
+            $saved = $c->ok('layout', ['layout' => $mine])['layout'];
+            $onDisk = json_decode((string) file_get_contents($c->server->layout), true);
+            $listed = $c->ok('databases')['layout'];
+
+            foreach (['answer' => $saved, 'file' => $onDisk, 'next list' => $listed] as $where => $layout) {
+                same([['id' => 'u:probe', 'label' => 'Probe', 'items' => [$db]]], $layout['groups'], "the groups in the {$where}, with the one that is not the user's own and the values that are not ids left out");
+                same(['u:probe', $db], $layout['order'], "the order in the {$where}");
+                same([$db], $layout['hidden'], "the hidden databases in the {$where}");
+                same(['u:probe' => true], (array) $layout['folded'], "the folded groups in the {$where}");
+            }
+        } finally {
+            $c->ok('layout', ['layout' => []]);
+        }
+    });
+
+    test("{$tag} logging out ends that browser's session and no other", function () use ($c, $db, $signIn) {
+        $other = $signIn();
+        $other->ok('databases');
+
+        same(['ok' => true], $other->ok('logout'));
+
+        same(401, $other->api('databases')['status'], 'the browser that logged out is signed out');
+        same(401, $other->api('rows', ['db' => $db, 'table' => ['name' => 'items']])['status'], 'and cannot read a table either');
+        $c->ok('databases');
+        $c->ok('rows', ['db' => $db, 'table' => ['name' => 'items']]);
+    });
+
+    // Making and dropping databases. The config lists sqlaris_test and one more name, so that is the only one to make.
+
+    test("{$tag} a new database is empty and opens in the page, and is dropped only when its name is typed back", function () use ($c, $db, $connect, $tablesOf, $hasDatabase) {
+        $id = explode('/', $db, 2)[0].'/'.TEST_EXTRA_DATABASE;
+        same(false, $hasDatabase(TEST_EXTRA_DATABASE), 'the run starts without it');
+
+        $r = $c->ok('create_database', ['db' => $db, 'name' => TEST_EXTRA_DATABASE]);
+
+        same($id, $r['id']);
+        same(true, $hasDatabase(TEST_EXTRA_DATABASE));
+        same([], $tablesOf($connect(TEST_EXTRA_DATABASE)), 'a new database has no tables');
+        same([], $c->ok('tables', ['db' => $id])['tables'], 'the page can open it');
+        $c->refused('create_database', ['db' => $db, 'name' => TEST_EXTRA_DATABASE], 'exist');
+
+        $c->refused('drop_database', ['db' => $id, 'confirm' => strtoupper(TEST_EXTRA_DATABASE)], 'Type the database name');
+        $c->refused('drop_database', ['db' => $id, 'confirm' => TEST_DATABASE], 'Type the database name');
+        $c->refused('drop_database', ['db' => $id], 'Type the database name');
+        same(true, $hasDatabase(TEST_EXTRA_DATABASE), 'a wrong name drops nothing');
+
+        $c->ok('drop_database', ['db' => $id, 'confirm' => TEST_EXTRA_DATABASE]);
+        same(false, $hasDatabase(TEST_EXTRA_DATABASE));
+    });
+
+    test("{$tag} a database the config keeps off the list is neither made nor dropped from here", function () use ($c, $db, $hasDatabase) {
+        $name = TEST_DATABASE.'_unlisted';
+        $server = explode('/', $db, 2)[0];
+
+        $c->refused('create_database', ['db' => $db, 'name' => $name], 'off the list');
+        same(false, $hasDatabase($name), 'it was not made');
+        $c->refused('create_database', ['db' => 'nope/x', 'name' => TEST_EXTRA_DATABASE], 'not on the list');
+        same(false, $hasDatabase(TEST_EXTRA_DATABASE), 'a database is not made from one that is not on the list either');
+        $c->refused('drop_database', ['db' => "{$server}/{$name}", 'confirm' => $name], 'not on the list');
+    });
+
+    // Keep this test last. PostgreSQL copies only a database nobody is in, so the viewer ends every other
+    // session in the test database first, and that ends $pdo too. What the test reads from the original it
+    // reads before the call, and after it the test goes on with connections opened after the call.
+    test("{$tag} a database made as a copy has the tables, indexes and rows of the original", function () use ($c, $db, $pdo, $q, $connect, $tablesOf, $indexesOf, $hasDatabase) {
+        same(false, $hasDatabase(TEST_EXTRA_DATABASE), 'the run starts without it');
+        $tables = $tablesOf($pdo, true);
+        check(count($tables) >= 4, 'the fixture tables are there: '.implode(', ', $tables));
+        $rows = [];
+
+        foreach ($tables as $table) {
+            $rows[$table] = $pdo->query('select * from '.$q($table).' order by 1')->fetchAll(PDO::FETCH_NUM);
+        }
+
+        check(in_array('items_name_idx', $indexesOf($pdo, 'items'), true), 'the original has the index the copy is checked for');
+
+        $r = $c->ok('create_database', ['db' => $db, 'name' => TEST_EXTRA_DATABASE, 'copy' => true]);
+
+        same(explode('/', $db, 2)[0].'/'.TEST_EXTRA_DATABASE, $r['id']);
+        $copy = $connect(TEST_EXTRA_DATABASE);
+        same([], array_diff($tables, $tablesOf($copy, true)), 'every table of the original is in the copy');
+
+        foreach ($tables as $table) {
+            same($rows[$table], $copy->query('select * from '.$q($table).' order by 1')->fetchAll(PDO::FETCH_NUM), "{$table} has the same rows in the copy");
+        }
+
+        check(in_array('items_name_idx', $indexesOf($copy, 'items'), true), 'the index came along');
+
+        $copy = null;
+        $c->ok('drop_database', ['db' => $r['id'], 'confirm' => TEST_EXTRA_DATABASE]);
+        same(false, $hasDatabase(TEST_EXTRA_DATABASE));
     });
 }
 
