@@ -25,8 +25,9 @@ RUN cp config.example.php config.php \
     && chown www-data:www-data /data \
     && chmod +x docker/entrypoint.sh
 
-# The sidebar arrangement you make in the page is kept here.
+# The sidebar arrangement and the diagram views you save in the page are kept here.
 ENV SQLARIS_LAYOUT=/data/layout.json
+ENV SQLARIS_VIEWS=/data/diagram-views.json
 VOLUME /data
 
 USER www-data

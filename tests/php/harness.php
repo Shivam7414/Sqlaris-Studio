@@ -77,6 +77,9 @@ final class TestServer
 {
     public readonly string $base;
 
+    /** Where this server keeps saved diagram views, so a test can read the file itself. */
+    public readonly string $views;
+
     private $process;
 
     public function __construct(string $config, public readonly int $port)
@@ -85,6 +88,8 @@ final class TestServer
         $env = getenv() + [];
         $env['SQLARIS_CONFIG'] = $config;
         $env['SQLARIS_LAYOUT'] = sys_get_temp_dir().'/sqlaris-test-layout-'.$port.'.json';
+        $this->views = sys_get_temp_dir().'/sqlaris-test-views-'.$port.'.json';
+        $env['SQLARIS_VIEWS'] = $this->views;
         $this->process = proc_open([PHP_BINARY, '-S', "127.0.0.1:{$port}", 'router.php'], [
             0 => ['pipe', 'r'],
             1 => ['file', sys_get_temp_dir().'/sqlaris-test-server.log', 'a'],
@@ -111,6 +116,12 @@ final class TestServer
     {
         proc_terminate($this->process);
         proc_close($this->process);
+
+        foreach ([$this->views, $this->views.'.lock'] as $file) {
+            if (is_file($file)) {
+                unlink($file);
+            }
+        }
     }
 }
 
@@ -119,7 +130,7 @@ final class TestClient
 {
     private string $cookie = '';
 
-    public function __construct(private readonly TestServer $server) {}
+    public function __construct(public readonly TestServer $server) {}
 
     /** @return array{status: int, body: string} */
     public function request(string $method, string $path, string $body = '', array $headers = []): array

@@ -111,6 +111,56 @@ function api_tests(string $tag, string $driver, TestClient $c, string $db, PDO $
         $c->refused('maintain', $items + ['op' => 'drop'], 'no such upkeep');
     });
 
+    // Views are kept in a file of the viewer's own, so the checks read that file.
+    test("{$tag} a diagram view is saved, comes back with the diagram, and is deleted", function () use ($c, $db) {
+        $onDisk = fn () => json_decode((string) file_get_contents($c->server->views), true);
+        $saved = $c->ok('save_view', ['db' => $db, 'view' => [
+            'name' => '  Items  ',
+            'tables' => ['s.items', 's.item_tags', 's.items', 42],
+            'at' => ['s.items' => [10.4, -20], 's.item_tags' => ['x', 1], 's.gone' => [1, 2]],
+            'layout' => 'flow',
+            'detail' => 'names',
+        ]])['views'];
+        same(['Items'], array_column($saved, 'name'));
+        $view = $onDisk()[$db][0];
+        same(['s.items', 's.item_tags'], $view['tables']);
+        same(['s.items' => [10, -20]], $view['at'], 'a place that is not two numbers, or of a table not in the view, is dropped');
+        same(['flow', 'names'], [$view['layout'], $view['detail']]);
+        same($saved, $c->ok('diagram', ['db' => $db])['views']);
+
+        $c->ok('save_view', ['db' => $db, 'view' => ['name' => 'items', 'tables' => ['s.items'], 'layout' => 'drop', 'detail' => 'x']]);
+        $views = $onDisk()[$db];
+        same(1, count($views), 'the same name in another case replaces the view');
+        same(['s.items'], $views[0]['tables']);
+        same(['flow', 'keys'], [$views[0]['layout'], $views[0]['detail']], 'a layout or detail not on the list falls back');
+
+        same([], $c->ok('delete_view', ['db' => $db, 'name' => 'ITEMS'])['views']);
+        check(! isset($onDisk()[$db]), 'nothing is kept for the database');
+    });
+
+    test("{$tag} a view needs a name and a table, and its text is only ever text", function () use ($c, $db, $count) {
+        $c->refused('save_view', ['db' => $db, 'view' => ['name' => '   ', 'tables' => ['s.items']]], 'Give the view a name');
+        $c->refused('save_view', ['db' => $db, 'view' => 'not a view'], 'Give the view a name');
+        $c->refused('save_view', ['db' => $db, 'view' => ['name' => 'Empty', 'tables' => []]], 'at least one table');
+        $c->refused('save_view', ['db' => $db, 'view' => ['name' => str_repeat('x', 61), 'tables' => ['s.items']]], 'up to 60 characters');
+        $c->refused('save_view', ['db' => 'nowhere/x', 'view' => ['name' => 'X', 'tables' => ['s.items']]], 'not on the list');
+        $c->refused('delete_view', ['db' => 'nowhere/x', 'name' => 'X'], 'not on the list');
+
+        $sql = "x'); drop table items; --";
+        same([$sql], $c->ok('save_view', ['db' => $db, 'view' => ['name' => $sql, 'tables' => [$sql]]])['views'][0]['tables']);
+        same(5, $count(), 'nothing in a view reaches the database');
+        same([], $c->ok('delete_view', ['db' => $db, 'name' => $sql])['views']);
+    });
+
+    test("{$tag} a views file that does not read is never written over", function () use ($c, $db) {
+        $broken = "{\"other/db\": [{\"name\": \"Kept\", \"tables\": [\"s.a\"]},]}\n";
+        file_put_contents($c->server->views, $broken);
+        $c->refused('save_view', ['db' => $db, 'view' => ['name' => 'New', 'tables' => ['s.items']]], 'Could not read diagram-views.json');
+        $c->refused('delete_view', ['db' => $db, 'name' => 'Kept'], 'Could not read diagram-views.json');
+        same($broken, file_get_contents($c->server->views), 'the file is as it was');
+        unlink($c->server->views);
+    });
+
     test("{$tag} an export gives every matching row, in each format", function () use ($c, $items) {
         foreach (['csv' => 'apple', 'json' => '"name":"apple"', 'sql' => "'apple'"] as $format => $expect) {
             $r = $c->api('export', $items + ['format' => $format, 'filters' => [['col' => 'name', 'op' => 'eq', 'value' => 'apple']]]);
@@ -299,6 +349,57 @@ function api_tests(string $tag, string $driver, TestClient $c, string $db, PDO $
         same('kept', $cell('note', 1));
     });
 
+    test("{$tag} the SQL tab keeps nothing when a script with changes fails", function () use ($c, $db, $cell) {
+        $message = $c->refused('sql', ['db' => $db, 'sql' => "update items set note = 'lost' where id = 3; select * from no_such_table", 'write' => true]);
+        check(! str_contains($message, 'may have been kept'), "nothing was kept, and the message says otherwise: {$message}");
+        same(null, $cell('note', 3));
+    });
+
+    // COMMIT or ROLLBACK in the script itself ends the transaction before the
+    // viewer can, so the answer must say the script decided, not the viewer.
+    test("{$tag} the SQL tab says when the script ended the transaction itself", function () use ($c, $db, $cell) {
+        $r = $c->ok('sql', ['db' => $db, 'sql' => "update items set note = 'undone' where id = 4; rollback", 'write' => true]);
+        same(false, $r['committed'], 'the script rolled back, so the viewer did not commit');
+        same(true, $r['ended']);
+        same(null, $cell('note', 4));
+
+        $r = $c->ok('sql', ['db' => $db, 'sql' => "update items set note = 'own' where id = 5; commit", 'write' => true]);
+        same([false, true], [$r['committed'], $r['ended']], 'the script committed, not the viewer');
+        same('own', $cell('note', 5));
+
+        $c->refused('sql', ['db' => $db, 'sql' => "update items set note = 'early' where id = 2; commit; select * from no_such_table", 'write' => true],
+            'part of the script may have been kept');
+        same('early', $cell('note', 2), 'the part before the COMMIT is kept, as the message says');
+    });
+
+    if ($driver === 'pgsql') {
+        // A deferred key is only checked at COMMIT, so the viewer's own COMMIT
+        // fails. PostgreSQL has then undone everything, and the message must not
+        // blame the script.
+        test("{$tag} the SQL tab keeps nothing when its own COMMIT is refused", function () use ($c, $db, $pdo) {
+            $message = $c->refused('sql', ['db' => $db, 'sql' => 'create table deferred_probe (item_id integer references items (id) deferrable initially deferred);'
+                .' insert into deferred_probe values (999999)', 'write' => true]);
+            check(! str_contains($message, 'may have been kept'), "nothing was kept, and the message says otherwise: {$message}");
+            same(0, (int) $pdo->query("select count(*) from information_schema.tables where table_name = 'deferred_probe'")->fetchColumn(), 'the new table was undone too');
+        });
+    }
+
+    if ($driver === 'mysql') {
+        // MySQL commits what came before a CREATE TABLE, even one that then fails.
+        // The failed one is the hard case: its error leaves PDO sure that the
+        // transaction is still open.
+        test("{$tag} the SQL tab says when CREATE TABLE committed the script", function () use ($c, $db, $cell, $pdo) {
+            $r = $c->ok('sql', ['db' => $db, 'sql' => "update items set note = 'ddl' where id = 3; create table ddl_probe (id int)", 'write' => true]);
+            $pdo->exec('drop table if exists ddl_probe');
+            same([false, true], [$r['committed'], $r['ended']]);
+            same('ddl', $cell('note', 3));
+
+            $c->refused('sql', ['db' => $db, 'sql' => "update items set note = 'ddl failed' where id = 4; create table ddl_probe like no_such_table", 'write' => true],
+                'part of the script may have been kept');
+            same('ddl failed', $cell('note', 4), 'CREATE TABLE committed the update before it failed');
+        });
+    }
+
     test("{$tag} the SQL tab shows rows, up to the limit", function () use ($c, $db) {
         $r = $c->ok('sql', ['db' => $db, 'sql' => 'select name from items where id <= 3 order by id']);
         same([['apple'], ['banana'], ['cherry']], $r['rows']);
@@ -345,7 +446,7 @@ function http_tests(TestServer $server, string $username, string $password): voi
     test('the router serves the page, the API and assets, and nothing else', function () use ($server) {
         $c = new TestClient($server);
 
-        foreach (['/.env', '/config.php', '/layout.json', '/src/lib.php', '/assets/../config.php', '/tests/php/run.php'] as $path) {
+        foreach (['/.env', '/config.php', '/layout.json', '/diagram-views.json', '/src/lib.php', '/assets/../config.php', '/tests/php/run.php'] as $path) {
             same(404, $c->request('GET', $path)['status'], $path);
         }
 

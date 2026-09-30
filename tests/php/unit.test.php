@@ -99,6 +99,26 @@ test('a saved layout keeps only the shape the page reads', function () {
     check(! isset($clean['extra']), 'unknown keys are dropped');
 });
 
+test('a saved diagram view keeps only the shape the page reads', function () {
+    $clean = dbv_clean_view([
+        'name' => "  Payroll\n",
+        'tables' => ['public.a', 'public.a', '', 7, ['nested'], str_repeat('x', 301), 'public.b'],
+        'at' => ['public.a' => [1.6, '2'], 'public.b' => [INF, 0], 'public.c' => [0, 0], 'public.x' => 'far'],
+        'layout' => 'sideways',
+        'detail' => 'all',
+        'extra' => 'dropped',
+    ]);
+
+    same('Payroll', $clean['name']);
+    same(['public.a', 'public.b'], $clean['tables']);
+    same(['public.a' => [2, 2]], (array) $clean['at'], 'only two finite numbers for a table in the view');
+    same(['flow', 'all'], [$clean['layout'], $clean['detail']]);
+    check(! isset($clean['extra']), 'unknown keys are dropped');
+    same(null, dbv_clean_view(['name' => 'No tables', 'tables' => []]));
+    same(null, dbv_clean_view(['name' => str_repeat('y', 61), 'tables' => ['public.a']]));
+    same(null, dbv_clean_view('junk'));
+});
+
 test('an IN filter splits on commas and new lines and binds every item', function () {
     same(['t in (?, ?, ?)', ['a', 'b', "c'd"]], dbv_in('t', "a, b\nc'd,,"));
     same(['1 = 1', []], dbv_in('t', ' , '));

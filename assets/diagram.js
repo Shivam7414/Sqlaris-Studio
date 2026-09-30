@@ -20,7 +20,9 @@
   const BORDER = 1;
 
   const DETAILS = ['names', 'keys', 'all'];
-  const ALONE = 'Stand-alone tables';
+  // In a view of some tables, a table can have keys and still none to the tables shown.
+  const aloneLabel = model => (model.partial ? 'Unlinked tables' : 'Stand-alone tables');
+  const aloneNote = model => (model.partial ? 'no keys to the tables shown' : 'no keys in or out');
 
   // ------------------------------------------------------------------ model
 
@@ -58,7 +60,83 @@
         if (!to.in.includes(from)) to.in.push(from);
       }
     });
+    // out and in change with the tables in view. allOut and allIn keep every link.
+    for (const n of nodes) {
+      n.allOut = n.out;
+      n.allIn = n.in;
+    }
     return { nodes, links, byKey, detail: null };
+  }
+
+  // ------------------------------------------------------------- the view
+  //
+  // A large database is never drawn whole: nobody can read a few hundred
+  // tables at once. The diagram shows a set of tables, and grows it by
+  // following their keys. The whole database is the set of every table.
+
+  // Only the tables of keys, and the lines between them, as a model the
+  // layouts take. Each table's out and in then hold only tables in view.
+  function viewOf(full, keys) {
+    const inView = new Set();
+    for (const k of keys) if (full.byKey.has(k)) inView.add(full.byKey.get(k));
+    for (const n of full.nodes) {
+      n.out = n.allOut.filter(m => inView.has(m));
+      n.in = n.allIn.filter(m => inView.has(m));
+    }
+    const nodes = full.nodes.filter(n => inView.has(n));
+    return {
+      nodes,
+      links: full.links.filter(l => inView.has(l.from) && inView.has(l.to)),
+      byKey: new Map(nodes.map(n => [n.key, n])),
+      detail: full.detail,
+      partial: nodes.length < full.nodes.length,
+    };
+  }
+
+  const linkCount = n => n.allOut.length + n.allIn.length;
+  const byLinks = (a, b) => linkCount(b) - linkCount(a) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+
+  // The tables most others point to, the natural places to start from.
+  function hubs(full, count = 8) {
+    return full.nodes.filter(n => linkCount(n))
+      .sort((a, b) => b.allIn.length - a.allIn.length || byLinks(a, b))
+      .slice(0, count);
+  }
+
+  // A table and the tables linked to it, the busiest first, up to most in
+  // all. The tables it points to come before the ones pointing to it, since
+  // there are few of them and they say what the table is.
+  function around(full, key, most = 24) {
+    const n = full.byKey.get(key);
+    if (!n) return [];
+    const out = [...n.allOut].sort(byLinks);
+    const into = n.allIn.filter(m => !n.allOut.includes(m)).sort(byLinks);
+    return [n, ...out, ...into].slice(0, most).map(m => m.key);
+  }
+
+  // The shortest chain of keys from one table to another, either way along
+  // each key, as table keys from a to b. Null when none is up to most long.
+  function pathBetween(full, a, b, most = 6) {
+    const start = full.byKey.get(a);
+    const end = full.byKey.get(b);
+    if (!start || !end) return null;
+    const back = new Map([[start, null]]);
+    let edge = [start];
+    for (let step = 0; step < most && edge.length && !back.has(end); step++) {
+      const next = [];
+      for (const n of edge) {
+        for (const m of [...n.allOut, ...n.allIn]) {
+          if (back.has(m)) continue;
+          back.set(m, n);
+          next.push(m);
+        }
+      }
+      edge = next;
+    }
+    if (!back.has(end)) return null;
+    const path = [];
+    for (let n = end; n; n = back.get(n)) path.unshift(n.key);
+    return path;
   }
 
   // Which columns each box shows at a detail level, and so how tall it is.
@@ -225,7 +303,7 @@
       const rest = gridOf(alone, 6);
       const top = main.pos.size ? main.h + 150 : 0;
       for (const [n, p] of rest.pos) pos.set(n, { x: p.x, y: p.y + top });
-      groups.push({ label: ALONE, note: 'no keys in or out', x: -28, y: top - 28, w: rest.w + 56, h: rest.h + 56 });
+      groups.push({ label: aloneLabel(model), note: aloneNote(model), x: -28, y: top - 28, w: rest.w + 56, h: rest.h + 56 });
     }
     return { pos, groups };
   }
@@ -278,7 +356,7 @@
     const blocks = [...members].map(([family, list]) => ({ label: labelOf(list, family), list }));
     const rest = model.nodes.filter(n => !home.has(n));
     if (rest.some(n => !isAlone(n))) blocks.push({ label: 'Other tables', list: rest.filter(n => !isAlone(n)) });
-    if (rest.some(isAlone)) blocks.push({ label: ALONE, list: rest.filter(isAlone) });
+    if (rest.some(isAlone)) blocks.push({ label: aloneLabel(model), list: rest.filter(isAlone) });
 
     const laid = blocks.map(b => {
       const linked = b.list.some(n => n.out.some(m => b.list.includes(m)));
@@ -386,6 +464,59 @@
 
   const LAYOUTS = { flow, families, constellation };
 
+  // Places for tables added to a view that already has its places, so the
+  // tables on screen stay where they are. The new ones stand in a column
+  // beside the table they came from, on the side the flow would put them
+  // (side 1 right, -1 left), centred on it, and as close as the column goes
+  // without covering a table. A long column wraps into lanes. placed and the
+  // result hold { x, y } by table.
+  function placeBeside(placed, anchor, added, side, { gap = 150, lane = 40, vgap = 26, maxH = 1400 } = {}) {
+    const at = placed.get(anchor);
+    const pos = new Map();
+    if (!at || !added.length) return pos;
+    const tall = added.reduce((sum, n) => sum + n.h + vgap, 0);
+    const per = Math.ceil(added.length / Math.max(1, Math.ceil(tall / maxH)));
+    const boxes = [...placed].map(([n, p]) => ({ x: p.x, y: p.y, h: n.h }));
+    let x = at.x + side * (W + gap);
+    for (let i = 0; i < added.length; i += per) {
+      const column = added.slice(i, i + per);
+      const high = column.reduce((sum, n) => sum + n.h + vgap, -vgap);
+      const top = at.y + anchor.h / 2 - high / 2;
+      const covers = cx => boxes.some(b => b.x < cx + W + lane / 2 && cx < b.x + W + lane / 2 && b.y < top + high + vgap && top < b.y + b.h + vgap);
+      for (let step = 0; step < 60 && covers(x); step++) x += side * (W + lane);
+      let y = top;
+      for (const n of column) {
+        pos.set(n, { x, y });
+        boxes.push({ x, y, h: n.h });
+        y += n.h + vgap;
+      }
+      x += side * (W + lane);
+    }
+    return pos;
+  }
+
+  // Moves tables down, as little as it takes, until no two boxes overlap.
+  // Boxes grow when the detail changes, and this keeps a view's own places.
+  function settle(pos, gap = 20) {
+    const order = [...pos.keys()].sort((a, b) => pos.get(a).y - pos.get(b).y || pos.get(a).x - pos.get(b).x);
+    for (let i = 1; i < order.length; i++) {
+      const a = order[i];
+      const p = pos.get(a);
+      for (let moved = true; moved;) {
+        moved = false;
+        for (let j = 0; j < i; j++) {
+          const b = order[j];
+          const q = pos.get(b);
+          if (Math.abs(p.x - q.x) < W + gap && p.y < q.y + b.h + gap && q.y < p.y + a.h + gap) {
+            p.y = q.y + b.h + gap;
+            moved = true;
+          }
+        }
+      }
+    }
+    return pos;
+  }
+
   // Every box's place for one layout at one detail level, in the diagram's
   // own pixels, and the boxes drawn around groups of tables.
   function layout(model, name, detail) {
@@ -464,28 +595,51 @@
     return at;
   }
 
+  // More tables than this behind one "+" and the page is asked which to show.
+  const PICK_OVER = 20;
+
   // Draws the diagram into host, which must be on the page already, and
   // returns the handle the page drives it with. opts:
   //   rows        row counts by "schema.name", from the tables action
-  //   saved       { layout, detail, positions } this browser remembered
+  //   saved       what this browser remembered, as onChange gives it
   //   homeSchema  the schema whose tables go by their bare name
   //   focus       a table key to open with in focus
   //   onOpen(t)   a table was double-clicked, as { schema, name }
   //   onFocus(k)  the table in focus changed, or null
-  //   onChange(s) the layout, the detail or a dragged position changed: the new saved
+  //   onChange(s) anything worth keeping changed. s is { layout, detail,
+  //               tables, at, arranged }: tables the keys shown, or null for
+  //               every table; at where each shown table sits, as [x, y];
+  //               arranged whether those are still the layout's own places.
+  //   onPick(p)   more than PICK_OVER tables wait behind a "+". p is { title,
+  //               choices: [{ key, label, links }], anchor }, and the answer
+  //               is a promise of the keys to show, or null.
   function mount(host, tables, opts = {}) {
-    const model = buildModel(tables, opts.rows || {});
-    const saved = { layout: 'flow', detail: 'keys', positions: {}, ...(opts.saved || {}) };
-    if (!LAYOUTS[saved.layout]) saved.layout = 'flow';
-    if (!DETAILS.includes(saved.detail)) saved.detail = 'keys';
+    const full = buildModel(tables, opts.rows || {});
+    const given = opts.saved || {};
+    const saved = {
+      layout: LAYOUTS[given.layout] ? given.layout : 'flow',
+      detail: DETAILS.includes(given.detail) ? given.detail : 'keys',
+      tables: Array.isArray(given.tables) ? given.tables.filter(k => full.byKey.has(k)) : null,
+      at: given.at && typeof given.at === 'object' ? { ...given.at } : {},
+      arranged: given.arranged !== false,
+    };
+    // Before views, a browser kept only the tables dragged, by layout. They
+    // go over the layout's places once, and are then kept the new way.
+    const dragged = !given.at && given.positions && given.positions[saved.layout];
+    let model = viewOf(full, saved.tables || full.nodes.map(n => n.key));
     const label = n => (n.schema === opts.homeSchema ? n.name : n.key);
 
     // ---- the stage
 
+    // The lines are drawn on one canvas the size of the screen, between the
+    // group boxes and the tables, and drawn again each frame the camera
+    // moves. As SVG, every zoom step made the browser style and paint every
+    // line again, which froze the page on a large database.
     const stage = el('div', 'dg-stage');
     const dots = el('div', 'dg-dots');
+    const ground = el('div', 'dg-world');
+    const lines = el('canvas', 'dg-edges');
     const world = el('div', 'dg-world');
-    const svg = svgEl('svg', 'dg-edges');
     const tip = el('div', 'dg-tip');
     const mini = el('canvas', 'dg-minimap');
     mini.title = 'Click to move there';
@@ -498,37 +652,76 @@
       b.addEventListener('click', run);
       return b;
     };
-    const alone = model.nodes.filter(isAlone).length;
     const info = el('div', 'dg-hud dg-hud-tl');
-    info.append(...[
-      el('span', 'dg-chip', counted(model.nodes.length, 'table')),
-      el('span', 'dg-chip', model.links.length ? counted(model.links.length, 'foreign key') : 'No foreign keys in this database'),
-      alone && model.links.length ? el('span', 'dg-chip', `${numbers.format(alone)} stand-alone`) : null,
-    ].filter(Boolean));
+    function drawInfo() {
+      if (!model.partial) {
+        const alone = model.nodes.filter(isAlone).length;
+        info.replaceChildren(...[
+          el('span', 'dg-chip', counted(model.nodes.length, 'table')),
+          el('span', 'dg-chip', model.links.length ? counted(model.links.length, 'foreign key') : 'No foreign keys in this database'),
+          alone && model.links.length ? el('span', 'dg-chip', `${numbers.format(alone)} stand-alone`) : null,
+        ].filter(Boolean));
+        return;
+      }
+      info.replaceChildren(
+        el('span', 'dg-chip', `${numbers.format(model.nodes.length)} of ${counted(full.nodes.length, 'table')}`),
+        el('span', 'dg-chip', counted(model.links.length, 'foreign key')));
+    }
+    // The table in focus, and what can be done with it.
+    const bar = el('div', 'dg-hud dg-hud-bl dg-bar');
     const controls = el('div', 'dg-hud dg-hud-tr');
     controls.append(
       button('out', 'Zoom out', () => zoomBy(1 / 1.4)),
       zoomLabel,
       button('in', 'Zoom in', () => zoomBy(1.4)),
-      button('fit', 'Fit every table', () => fit()));
-    world.append(svg);
-    stage.append(dots, world, info, controls, mini, tip);
+      button('fit', 'Fit the tables shown', () => fit()));
+    stage.append(dots, ground, lines, world, info, controls, bar, mini, tip);
     host.replaceChildren(stage);
 
     // ---- boxes and lines
 
+    // A box is made the first time its table is shown, and kept for when it comes back.
     const nodeOf = new Map();
-    for (const n of model.nodes) {
-      const hub = n.out.length + n.in.length >= 3;
+    function boxOf(n) {
+      if (n.el) return n.el;
+      const hub = n.allOut.length + n.allIn.length >= 3;
       n.el = el('div', 'dg-node' + (n.rows === 0 ? ' empty' : '') + (String(n.kind).includes('view') ? ' is-view' : '') + (hub ? ' hub' : ''));
       n.el.dataset.key = n.key;
       n.el.addEventListener('pointerenter', () => hover(n, true));
       n.el.addEventListener('pointerleave', () => hover(n, false));
+      // The tables hidden behind this one: on the left the ones pointing to
+      // it, on the right the ones it points to, where the flow would put them.
+      n.more = {};
+      for (const side of ['in', 'out']) {
+        const b = el('button', `dg-more ${side}`);
+        b.type = 'button';
+        b.addEventListener('click', () => showHidden(n, side, b));
+        n.more[side] = b;
+      }
       nodeOf.set(n.el, n);
-      world.append(n.el);
+      return n.el;
+    }
+
+    const hiddenOf = (n, side) => (side === 'in' ? n.allIn : n.allOut).filter(m => !model.byKey.has(m.key));
+
+    // Each "+" says how many linked tables are not shown yet.
+    function drawMore() {
+      for (const n of model.nodes) {
+        for (const side of ['in', 'out']) {
+          const count = hiddenOf(n, side).length;
+          const b = n.more[side];
+          b.hidden = !count;
+          if (!count) continue;
+          b.textContent = `+${numbers.format(count)}`;
+          b.title = side === 'in'
+            ? (count === 1 ? `Show the table that points to ${label(n)}` : `Show the ${numbers.format(count)} tables that point to ${label(n)}`)
+            : (count === 1 ? `Show the table ${label(n)} points to` : `Show the ${numbers.format(count)} tables ${label(n)} points to`);
+        }
+      }
     }
 
     function drawNode(n) {
+      n.drawn = saved.detail;
       const head = el('header');
       head.append(el('i'), el('b', null, label(n)), el('small', null, n.rows == null ? '' : counted(n.rows, 'row')));
       const parts = [head];
@@ -539,7 +732,7 @@
           row.append(el('span', null, c.name));
           if (n.pk.has(c.name)) row.append(el('em', null, 'PK'));
           else if (n.fkCols.has(c.name)) row.append(el('em', 'fk', 'FK'));
-          if (model.detail === 'all') row.append(el('small', null, c.type));
+          if (saved.detail === 'all') row.append(el('small', null, c.type));
           cols.append(row);
         }
         parts.push(cols);
@@ -550,35 +743,77 @@
         far.append(i < all.length - 1 ? part + '_' : part);
         if (i < all.length - 1) far.append(el('wbr'));
       });
-      parts.push(far);
+      parts.push(far, n.more.in, n.more.out);
       n.el.classList.toggle('bare', !n.shown.length);
       n.el.replaceChildren(...parts);
+      n.el.style.setProperty('--fit', fitOf(n).toFixed(3));
     }
 
-    for (const l of model.links) {
-      l.g = svgEl('g', 'dg-edge');
-      l.hit = svgEl('path', 'hit');
-      l.base = svgEl('path', 'base');
-      l.base.setAttribute('pathLength', '1');
-      l.flow = svgEl('path', 'flow');
-      l.g.append(l.hit, l.base, l.flow);
-      svg.append(l.g);
-      l.hit.addEventListener('pointerenter', () => {
-        tip.textContent = `${label(l.from)}.${l.cols.join(', ')} to ${label(l.to)}.${l.refCols.join(', ')}`;
-        tip.classList.add('on');
+    // How large the zoomed out name may grow, as a multiple of its 12px, and
+    // still sit inside its box. The name is tried on one line, then broken
+    // after its underscores onto two, three and more, each way as evenly as it
+    // goes. Without this a long name on a short box spills over its neighbours
+    // and hides under them.
+    let pen = null;
+    function fitOf(n) {
+      if (!pen) {
+        pen = document.createElement('canvas').getContext('2d');
+        const style = getComputedStyle(n.el.querySelector('.dg-far'));
+        pen.font = `${style.fontWeight} 100px ${style.fontFamily}`;
+      }
+      const words = label(n).split('_').map((w, i, all) => (i < all.length - 1 ? w + '_' : w));
+      const m = words.length;
+      const roomW = W - BORDER * 2 - 12;
+      const roomH = n.h - BORDER * 2 - 6;
+      // span[i][j]: how wide words i to j - 1 are on one line, at 12px.
+      const span = words.map((_, i) => {
+        const row = [];
+        let text = '';
+        for (let j = i + 1; j <= m; j++) row[j] = pen.measureText(text += words[j - 1]).width * 0.12;
+        return row;
       });
-      l.hit.addEventListener('pointermove', e => {
-        const r = stage.getBoundingClientRect();
-        tip.style.translate = `${e.clientX - r.left + 14}px ${e.clientY - r.top + 14}px`;
-      });
-      l.hit.addEventListener('pointerleave', () => tip.classList.remove('on'));
+      // widest[j]: the narrowest the widest line can be with the first j words on the lines so far.
+      let widest = [0, ...Array(m).fill(Infinity)];
+      let best = 0;
+      for (let lines = 1; lines <= m; lines++) {
+        const next = Array(m + 1).fill(Infinity);
+        for (let j = 1; j <= m; j++) {
+          for (let i = lines - 1; i < j; i++) next[j] = Math.min(next[j], Math.max(widest[i], span[i][j]));
+        }
+        widest = next;
+        best = Math.max(best, Math.min(roomW / widest[m], roomH / (lines * 12 * 1.05)));
+      }
+      return best * 0.95;
     }
+
+    // The first sizes were measured before the page's font may have arrived.
+    if (document.fonts) {
+      document.fonts.ready.then(() => {
+        if (stopped) return;
+        pen = null;
+        // A box not on screen is measured again when it next shows.
+        for (const n of full.nodes) if (n.el) n.drawn = null;
+        for (const n of model.nodes) drawNode(n);
+      });
+    }
+
+    // A line is lit while the pointer is on it or on one of its tables, hot
+    // while one of its tables is in focus, and drawn in from the time in at.
+    for (const l of full.links) {
+      l.lit = false;
+      l.hot = false;
+      l.at = -Infinity;
+    }
+    let overLine = null;
+    let searching = false;
 
     function hover(n, on) {
-      for (const l of model.links) if (l.from === n || l.to === n) l.g.classList.toggle('near', on);
+      for (const l of model.links) if (l.from === n || l.to === n) l.lit = on;
+      kick();
     }
 
-    // A line leaves the side of its box that faces the table it points at, and ends in an arrow.
+    // A line leaves the side of its box that faces the table it points at, and
+    // ends in an arrow. It comes back as a cubic curve from p0 to p3.
     function geometry(l) {
       const a = l.from;
       const b = l.to;
@@ -587,10 +822,7 @@
         const y1 = a.y + rowY(a, l.cols[0]);
         const y2 = a.y + rowY(a, l.refCols[0]);
         const bend = 34 + Math.abs(y2 - y1) * 0.15;
-        return {
-          curve: `M${x} ${y1} C${x + bend} ${y1}, ${x + bend} ${y2}, ${x + 1} ${y2}`,
-          arrow: `M${x + 7} ${y2 - 4.5} L${x + 1} ${y2} L${x + 7} ${y2 + 4.5}`,
-        };
+        return { p: [x, y1, x + bend, y1, x + bend, y2, x + 1, y2], dir: -1 };
       }
       const dir = b.x + W / 2 >= a.x + W / 2 ? 1 : -1;
       const x1 = dir > 0 ? a.x + W : a.x;
@@ -598,23 +830,158 @@
       const x2 = dir > 0 ? b.x : b.x + W;
       const y2 = b.y + rowY(b, l.refCols[0]);
       const pull = Math.max(46, Math.abs(x2 - x1) / 2);
-      return {
-        curve: `M${x1} ${y1} C${x1 + pull * dir} ${y1}, ${x2 - pull * dir} ${y2}, ${x2 - 2 * dir} ${y2}`,
-        arrow: `M${x2 - 8 * dir} ${y2 - 4.5} L${x2 - 1.5 * dir} ${y2} L${x2 - 8 * dir} ${y2 + 4.5}`,
-      };
+      return { p: [x1, y1, x1 + pull * dir, y1, x2 - pull * dir, y2, x2 - 2 * dir, y2], dir };
     }
 
-    function drawEdges() {
+    // Each line's curve and arrow as paths, how long it is, and the box it stays inside.
+    function shapeEdges() {
       for (const l of model.links) {
-        const { curve, arrow } = geometry(l);
-        l.hit.setAttribute('d', curve);
-        l.flow.setAttribute('d', curve);
-        l.base.setAttribute('d', `${curve} ${arrow}`);
+        const { p, dir } = geometry(l);
+        const [x0, y0, x1, y1, x2, y2, x3, y3] = p;
+        // The arrow's tip sits half a pixel past the curve's end, pointing the way the line runs.
+        const tx = x3 + 0.5 * dir;
+        l.curve = new Path2D(`M${x0} ${y0} C${x1} ${y1}, ${x2} ${y2}, ${x3} ${y3}`);
+        l.arrow = new Path2D(`M${tx - 6.5 * dir} ${y3 - 4.5} L${tx} ${y3} L${tx - 6.5 * dir} ${y3 + 4.5}`);
+        // Halfway between the straight line and the control polygon is close enough for drawing it in.
+        const chord = Math.hypot(x3 - x0, y3 - y0);
+        const hull = Math.hypot(x1 - x0, y1 - y0) + Math.hypot(x2 - x1, y2 - y1) + Math.hypot(x3 - x2, y3 - y2);
+        l.len = (chord + hull) / 2 + 12;
+        // A cubic curve never leaves the box around its four points.
+        l.box = {
+          x0: Math.min(x0, x1, x2, x3) - 10,
+          y0: Math.min(y0, y1, y2, y3) - 10,
+          x1: Math.max(x0, x1, x2, x3) + 10,
+          y1: Math.max(y0, y1, y2, y3) + 10,
+        };
       }
+    }
+
+    // What the camera sees, in the diagram's own pixels.
+    function viewBox() {
+      const v = size();
+      return { x0: -cam.x / cam.k, y0: -cam.y / cam.k, x1: (v.w - cam.x) / cam.k, y1: (v.h - cam.y) / cam.k };
+    }
+    const meets = (a, b) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+
+    // The lines' canvas, scaled so its pixels are the screen's and its
+    // drawing is in the diagram's own.
+    function pen2d() {
+      const ratio = devicePixelRatio || 1;
+      const c = lines.getContext('2d');
+      c.setTransform(ratio * cam.k, 0, 0, ratio * cam.k, ratio * cam.x, ratio * cam.y);
+      return c;
+    }
+
+    // A line keeps about the same width on screen at any zoom, and thins out
+    // when zoomed very far out. The lit and hot lines go over the others.
+    function drawEdges(now) {
+      const ratio = devicePixelRatio || 1;
+      const v = size();
+      if (lines.width !== Math.round(v.w * ratio) || lines.height !== Math.round(v.h * ratio)) {
+        lines.width = Math.round(v.w * ratio);
+        lines.height = Math.round(v.h * ratio);
+      }
+      const c = lines.getContext('2d');
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      c.clearRect(0, 0, lines.width, lines.height);
+      if (!model.links.length) return;
+      paints();
+      pen2d();
+      const view = viewBox();
+      const px = 1 / cam.k;
+      const thin = Math.min(1, 2.6 * cam.k);
+      const moving = !still();
+      c.lineCap = 'round';
+      c.lineJoin = 'round';
+      for (const top of [false, true]) {
+        for (const l of model.links) {
+          const lit = l.lit || l.hot || l === overLine;
+          if (lit !== top || !meets(l.box, view)) continue;
+          const t = clamp01((now - l.at) / 900);
+          if (t <= 0) continue;
+          c.globalAlpha = searching || (focused && !l.hot) ? 0.07 : 1;
+          c.strokeStyle = lit ? colors.accent : colors.edge;
+          c.lineWidth = (lit ? 2 : 1.5) * thin * px;
+          if (t < 1) {
+            // Drawing itself in, easing out, from the table holding the key.
+            const e = 1 - Math.pow(1 - t, 3);
+            c.setLineDash([l.len * e, l.len]);
+            c.stroke(l.curve);
+            c.setLineDash([]);
+            continue;
+          }
+          c.stroke(l.curve);
+          c.stroke(l.arrow);
+          // Dots run along a focused table's keys, in the direction they point.
+          if (l.hot && moving && !searching) {
+            c.strokeStyle = colors.flow;
+            c.globalAlpha = 0.95;
+            c.lineWidth = 2.2 * thin * px;
+            c.setLineDash([0.1, 11]);
+            c.lineDashOffset = -((now % 700) / 700) * 11.1;
+            c.stroke(l.curve);
+            c.setLineDash([]);
+            c.lineDashOffset = 0;
+          }
+        }
+      }
+      c.globalAlpha = 1;
+    }
+
+    // The line under a point on the stage, lit and hot ones first, or null.
+    function edgeAt(sx, sy) {
+      if (!model.links.length || !model.links[0].box) return null;
+      const ratio = devicePixelRatio || 1;
+      const c = pen2d();
+      const reach = 6 / cam.k;
+      c.lineWidth = reach * 2;
+      const wx = (sx - cam.x) / cam.k;
+      const wy = (sy - cam.y) / cam.k;
+      const spot = { x0: wx - reach, y0: wy - reach, x1: wx + reach, y1: wy + reach };
+      const order = [...model.links].sort((a, b) => (b.lit || b.hot) - (a.lit || a.hot));
+      // A line that came in since the last frame has no shape yet.
+      return order.find(l => l.box && meets(l.box, spot) && c.isPointInStroke(l.curve, sx * ratio, sy * ratio)) || null;
+    }
+
+    function pointAt(e) {
+      if (drag || e.target.closest('.dg-node, .dg-hud, .dg-minimap')) {
+        if (overLine) {
+          overLine = null;
+          tip.classList.remove('on');
+          stage.classList.remove('on-line');
+          kick();
+        }
+        return;
+      }
+      const r = stage.getBoundingClientRect();
+      const l = edgeAt(e.clientX - r.left, e.clientY - r.top);
+      if (l !== overLine) {
+        overLine = l;
+        stage.classList.toggle('on-line', !!l);
+        tip.classList.toggle('on', !!l);
+        if (l) tip.textContent = `${label(l.from)}.${l.cols.join(', ')} to ${label(l.to)}.${l.refCols.join(', ')}`;
+        kick();
+      }
+      if (l) tip.style.translate = `${e.clientX - r.left + 14}px ${e.clientY - r.top + 14}px`;
     }
 
     function placeNodes() {
       for (const n of model.nodes) n.el.style.translate = `${n.x}px ${n.y}px`;
+    }
+
+    // The colours the canvases draw with follow the page's theme. They are
+    // read again whenever the pointer comes back.
+    let colors = null;
+    function paints() {
+      if (colors) return;
+      const probe = el('i');
+      stage.append(probe);
+      const read = token => {
+        probe.style.color = `var(${token})`;
+        return getComputedStyle(probe).color;
+      };
+      colors = { accent: read('--accent'), ink: read('--ink'), edge: read('--edge'), flow: read('--on-accent') };
+      probe.remove();
     }
 
     // ---- camera
@@ -622,17 +989,31 @@
     const cam = { x: 0, y: 0, k: 1 };
     const size = () => ({ w: Math.max(1, stage.clientWidth), h: Math.max(1, stage.clientHeight) });
 
+    // Only what changed is written, so a frame where the camera stands still costs nothing here.
+    const shown = { x: NaN, y: NaN, k: NaN, inv: NaN };
     function applyCamera() {
-      world.style.transform = `translate(${cam.x}px, ${cam.y}px) scale(${cam.k})`;
-      const step = 22 * cam.k;
-      dots.style.backgroundSize = `${step}px ${step}px`;
-      dots.style.backgroundPosition = `${cam.x}px ${cam.y}px`;
-      zoomLabel.textContent = Math.round(cam.k * 100) + '%';
+      if (cam.x !== shown.x || cam.y !== shown.y || cam.k !== shown.k) {
+        const move = `translate(${cam.x}px, ${cam.y}px) scale(${cam.k})`;
+        world.style.transform = move;
+        ground.style.transform = move;
+        const step = 22 * cam.k;
+        dots.style.backgroundSize = `${step}px ${step}px`;
+        dots.style.backgroundPosition = `${cam.x}px ${cam.y}px`;
+        zoomLabel.textContent = Math.round(cam.k * 100) + '%';
+        world.classList.toggle('far', cam.k < 0.5);
+        world.classList.toggle('farther', cam.k < 0.3);
+        Object.assign(shown, cam);
+      }
       // Far out, a box turns into a tile with its name large enough to read.
       // Further out, only the tables with three keys or more keep a name.
-      world.style.setProperty('--inv', (1 / cam.k).toFixed(3));
-      world.classList.toggle('far', cam.k < 0.5);
-      world.classList.toggle('farther', cam.k < 0.3);
+      // The names are sized again only in steps of a tenth, because each time
+      // the browser lays out every one of them.
+      const inv = 1 / cam.k;
+      if (!(Math.abs(Math.log(inv / shown.inv)) < 0.1)) {
+        shown.inv = inv;
+        world.style.setProperty('--inv', inv.toFixed(3));
+        ground.style.setProperty('--inv', inv.toFixed(3));
+      }
     }
 
     // The box around some tables, at where they are going while they move.
@@ -721,9 +1102,10 @@
       applyCamera();
       if (dirty) {
         placeNodes();
-        drawEdges();
+        shapeEdges();
         dirty = false;
       }
+      drawEdges(now);
       drawMinimap();
       if (tasks.size) frame = requestAnimationFrame(tick);
     }
@@ -736,31 +1118,69 @@
       observer.disconnect();
     }
 
-    // ---- layouts
+    // ---- the tables shown, and where they sit
 
-    let drawnDetail = null;
     let moving = null;
     let groupEls = [];
 
-    // Works out the layout and moves every table to its place in a wave from
-    // left to right. A table this browser dragged keeps its own place. first
-    // puts them there at once.
-    function arrange({ first = false } = {}) {
-      const { pos, groups } = layout(model, saved.layout, saved.detail);
-      if (drawnDetail !== saved.detail) {
-        model.nodes.forEach(drawNode);
-        drawnDetail = saved.detail;
+    // Where a shown table is, or where it is going while it moves.
+    const placeOf = n => ({ x: n.tx ?? n.x, y: n.ty ?? n.y });
+    const places = () => new Map(model.nodes.filter(n => n.placed).map(n => [n, placeOf(n)]));
+    const keysShown = () => model.nodes.map(n => n.key);
+
+    // Shows exactly the tables of keys. A table that leaves takes its box
+    // and its place with it. One that arrives gets a box, not placed yet.
+    function showSet(keys) {
+      model = viewOf(full, keys);
+      setDetail(model, saved.detail);
+      // A box taken away under the pointer never hears it leave.
+      for (const l of full.links) l.lit = false;
+      const keep = new Set(model.nodes);
+      for (const n of full.nodes) {
+        if (keep.has(n)) {
+          // On the page first: the name's size is measured with the font the page gives it.
+          if (!boxOf(n).isConnected) world.append(n.el);
+          if (n.drawn !== saved.detail) drawNode(n);
+        } else if (n.el && n.el.isConnected) {
+          n.el.remove();
+          n.placed = false;
+          n.tx = n.ty = undefined;
+        }
       }
-      const own = saved.positions[saved.layout] || {};
+      saved.tables = model.partial ? keysShown() : null;
+      for (const k of Object.keys(saved.at)) if (!model.byKey.has(k)) delete saved.at[k];
+      if (focused && !keep.has(focused)) focus(null, { fly: false });
+      else markFocus();
+      search(query);
+      drawMore();
+      drawInfo();
+      drawBar();
+      dirty = true;
+      kick();
+    }
+
+    // Moves every shown table to its place in pos, in a wave from left to
+    // right; a table missing from pos stays where it is. A table not placed
+    // before comes out from origin, or fades in where it belongs when there
+    // is none. jump puts every table in place at once.
+    function moveTo(pos, { jump = false, origin = null } = {}) {
+      jump = jump || still();
+      const arriving = [];
       for (const n of model.nodes) {
-        const p = own[n.key] ? { x: own[n.key][0], y: own[n.key][1] } : pos.get(n);
+        const p = pos.get(n) || placeOf(n);
+        if (!n.placed) {
+          n.x = origin && !jump ? origin.x : p.x;
+          n.y = origin && !jump ? origin.y : p.y;
+          n.placed = true;
+          arriving.push(n);
+        }
         n.held = false;
         n.fx = n.x;
         n.fy = n.y;
         n.tx = p.x;
         n.ty = p.y;
+        saved.at[n.key] = [Math.round(p.x), Math.round(p.y)];
       }
-      const jump = first || still();
       const span = Math.max(1, ...model.nodes.map(n => n.fx));
       const start = performance.now();
       const me = moving = {};
@@ -768,7 +1188,7 @@
         if (moving !== me) return false;
         let busy = false;
         for (const n of model.nodes) {
-          if (n.held) continue;
+          if (n.held || n.tx === undefined) continue;
           const t = jump ? 1 : clamp01((now - start - (n.fx / span) * 220) / 1050);
           const e = easeInOut(t);
           n.x = n.fx + (n.tx - n.fx) * e;
@@ -779,7 +1199,176 @@
         if (!busy) for (const n of model.nodes) n.tx = n.ty = undefined;
         return busy;
       });
-      drawGroups(groups, jump);
+      if (arriving.length && !jump) reveal(arriving, !origin);
+    }
+
+    // Lays out the shown tables again with the chosen layout.
+    function arrange({ jump = false, origin = null } = {}) {
+      const { pos, groups } = layout(model, saved.layout, saved.detail);
+      moveTo(pos, { jump, origin });
+      drawGroups(groups, jump || still());
+      saved.arranged = true;
+    }
+
+    // Places for the shown tables that have none: the place this view saved
+    // for them, else beside the placed table they share most keys with, else
+    // in rows below everything. Null when no table has a place to go by.
+    function placeRest() {
+      const pos = new Map();
+      for (const n of model.nodes) {
+        const p = saved.at[n.key];
+        if (!n.placed && Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1])) pos.set(n, { x: p[0], y: p[1] });
+      }
+      const known = new Map([...places(), ...pos]);
+      const rest = model.nodes.filter(n => !n.placed && !pos.has(n));
+      if (!rest.length) return pos;
+      if (!known.size) return null;
+      const beside = new Map();
+      const loose = [];
+      for (const n of rest) {
+        const anchor = [...n.allOut, ...n.allIn].filter(m => known.has(m)).sort(byLinks)[0];
+        if (!anchor) {
+          loose.push(n);
+          continue;
+        }
+        const side = anchor.allIn.includes(n) ? -1 : 1;
+        const key = `${anchor.key}\n${side}`;
+        if (!beside.has(key)) beside.set(key, { anchor, side, list: [] });
+        beside.get(key).list.push(n);
+      }
+      for (const { anchor, side, list } of beside.values()) {
+        for (const [m, p] of placeBeside(known, anchor, list, side)) {
+          pos.set(m, p);
+          known.set(m, p);
+        }
+      }
+      if (loose.length) {
+        const b = bounds([...known.keys()].map(n => ({ x: known.get(n).x, y: known.get(n).y, h: n.h })));
+        const row = gridOf(loose, 6);
+        for (const [n, p] of row.pos) pos.set(n, { x: b.x0 + p.x, y: b.y1 + 120 + p.y });
+      }
+      return pos;
+    }
+
+    // Shows more tables and leaves the shown ones where they are. The new
+    // ones stand beside from when it is given, else beside what links them.
+    function addTables(keys, from = null) {
+      const add = keys.map(k => full.byKey.get(k)).filter(n => n && !model.byKey.has(n.key));
+      if (!add.length) return add;
+      const empty = !model.nodes.length;
+      showSet([...keysShown(), ...add.map(n => n.key)]);
+      if (empty) {
+        arrange({ jump: true });
+        reveal(model.nodes, true);
+        flyTo(fitView(bounds(model.nodes)));
+        changed();
+        return add;
+      }
+      clearGroups();
+      let pos;
+      if (from && from.placed) {
+        const known = places();
+        pos = new Map();
+        const into = add.filter(n => from.allIn.includes(n));
+        const onto = add.filter(n => !from.allIn.includes(n));
+        for (const [list, side] of [[into, -1], [onto, 1]]) {
+          for (const [m, p] of placeBeside(known, from, list, side)) {
+            pos.set(m, p);
+            known.set(m, p);
+          }
+        }
+      } else {
+        pos = placeRest() || new Map();
+      }
+      moveTo(pos, { origin: from && from.placed ? placeOf(from) : null });
+      saved.arranged = false;
+      // Pulls back far enough to show what came in, and never zooms in to do it.
+      flyTo(fitView(bounds(from ? [from, ...add] : add), 90, cam.k));
+      changed();
+      return add;
+    }
+
+    function hideTables(keys) {
+      const gone = new Set(keys);
+      showSet(keysShown().filter(k => !gone.has(k)));
+      clearGroups();
+      saved.arranged = false;
+      changed();
+    }
+
+    // Starts again from one table and the tables linked to it.
+    function showAround(key) {
+      const n = full.byKey.get(key);
+      if (!n) return;
+      const origin = n.placed ? placeOf(n) : null;
+      showSet(around(full, key));
+      arrange({ origin });
+      changed();
+      focus(key);
+    }
+
+    // The tables linked to a shown one and not shown yet: those pointing to
+    // it (in), those it points to (out), or both. Past PICK_OVER, the page
+    // asks which.
+    function showHidden(n, side, anchor = null) {
+      const list = side === 'both'
+        ? [...new Set([...hiddenOf(n, 'out'), ...hiddenOf(n, 'in')])]
+        : hiddenOf(n, side);
+      if (!list.length) return;
+      list.sort(byLinks);
+      const add = keys => {
+        if (keys && keys.length && !stopped) addTables(keys, n);
+      };
+      if (list.length <= PICK_OVER || !opts.onPick) {
+        add(list.map(m => m.key));
+        return;
+      }
+      const title = side === 'in' ? `Tables that point to ${label(n)}` : side === 'out' ? `Tables ${label(n)} points to` : `Tables linked to ${label(n)}`;
+      Promise.resolve(opts.onPick({ title, choices: list.map(m => ({ key: m.key, label: label(m), links: linkCount(m) })), anchor: anchor || n.el }))
+        .then(add);
+    }
+
+    // Shows the shortest chain of keys between two tables, each new table
+    // beside the one before it, and lights the chain up for a moment.
+    function showPath(a, b) {
+      const path = pathBetween(full, a, b);
+      if (!path) return false;
+      const add = path.filter(k => !model.byKey.has(k));
+      if (add.length) {
+        showSet([...keysShown(), ...add]);
+        clearGroups();
+        const known = places();
+        const pos = new Map();
+        for (let i = 1; i < path.length; i++) {
+          const m = full.byKey.get(path[i]);
+          if (known.has(m)) continue;
+          const prev = full.byKey.get(path[i - 1]);
+          for (const [x, p] of placeBeside(known, prev, [m], prev.allIn.includes(m) ? -1 : 1)) {
+            pos.set(x, p);
+            known.set(x, p);
+          }
+        }
+        moveTo(pos);
+        saved.arranged = false;
+        changed();
+      }
+      const chain = path.map(k => model.byKey.get(k));
+      const steps = new Set(chain.slice(1).map((m, i) => `${chain[i].key}\n${m.key}`));
+      const onChain = l => steps.has(`${l.from.key}\n${l.to.key}`) || steps.has(`${l.to.key}\n${l.from.key}`);
+      focus(null, { fly: false });
+      for (const m of chain) m.el.classList.add('match');
+      for (const l of model.links) if (onChain(l)) l.lit = true;
+      flyTo(fitView(bounds(chain), 90, 1.1));
+      setTimeout(() => {
+        for (const m of chain) m.el.classList.remove('match');
+        for (const l of model.links) if (onChain(l)) l.lit = false;
+        kick();
+      }, 3200);
+      return path;
+    }
+
+    function clearGroups() {
+      drawGroups([], true);
     }
 
     function drawGroups(groups, jump) {
@@ -795,28 +1384,73 @@
         const name = el('b', null, g.label);
         name.append(el('small', null, g.note));
         box.append(name);
-        world.insertBefore(box, svg);
+        ground.append(box);
         if (!jump) setTimeout(() => box.classList.remove('gone'), 650);
         return box;
       });
     }
 
-    // The tables arrive in a wave from left to right, and each line draws
-    // itself in once both its tables are there.
-    function reveal() {
-      if (still()) {
-        for (const l of model.links) l.g.classList.add('drawn');
-        return;
-      }
-      const b = bounds(model.nodes);
+    // Tables arrive in a wave from left to right, fading in when fade, and
+    // each line draws itself in once both its tables are there.
+    function reveal(list, fade) {
+      if (still() || !list.length) return;
+      const b = bounds(list);
       const wide = Math.max(1, b.x1 - b.x0);
       const tall = Math.max(1, b.y1 - b.y0);
-      const at = new Map(model.nodes.map(n => [n, 120 + ((n.tx - b.x0) / wide) * 900 + ((n.ty - b.y0) / tall) * 200]));
-      for (const n of model.nodes) {
-        n.el.classList.add('pre');
-        setTimeout(() => n.el.classList.remove('pre'), at.get(n));
+      const at = new Map(list.map(n => [n, 120 + (((n.tx ?? n.x) - b.x0) / wide) * 900 + (((n.ty ?? n.y) - b.y0) / tall) * 200]));
+      if (fade) {
+        for (const n of list) {
+          n.el.classList.add('pre');
+          setTimeout(() => n.el.classList.remove('pre'), at.get(n));
+        }
       }
-      for (const l of model.links) setTimeout(() => l.g.classList.add('drawn'), Math.max(at.get(l.from), at.get(l.to)) + 260);
+      const now = performance.now();
+      let last = now;
+      for (const l of model.links) {
+        if (!at.has(l.from) && !at.has(l.to)) continue;
+        l.at = now + Math.max(at.get(l.from) || 0, at.get(l.to) || 0) + 260;
+        last = Math.max(last, l.at + 900);
+      }
+      kick(t => t < last);
+    }
+
+    // The focused table's bar: open it, show what links to it, keep only
+    // it and its neighbours, find a path from it, or hide it.
+    function drawBar() {
+      const n = focused;
+      bar.classList.toggle('on', !!n);
+      if (!n) {
+        bar.replaceChildren();
+        return;
+      }
+      const act = (text, title, run, cls = 'btn small') => {
+        const b = el('button', cls, text);
+        b.type = 'button';
+        b.title = title;
+        b.addEventListener('click', run);
+        return b;
+      };
+      const hidden = new Set([...hiddenOf(n, 'in'), ...hiddenOf(n, 'out')]).size;
+      const near = new Set([n, ...n.out, ...n.in]);
+      bar.replaceChildren(...[
+        el('b', null, label(n)),
+        act('Open table', 'Open the rows of this table', () => opts.onOpen && opts.onOpen({ schema: n.schema, name: n.name })),
+        hidden ? act(`Show ${counted(hidden, 'linked table')}`, 'Show the tables linked to this one that are hidden', e => showHidden(n, 'both', e.currentTarget)) : null,
+        model.nodes.length > near.size ? act('Hide the rest', 'Keep only this table and the tables linked to it', () => hideTables(model.nodes.filter(m => !near.has(m)).map(m => m.key))) : null,
+        opts.onPick && full.nodes.length > 1 ? act('Path to...', 'Show the chain of keys from this table to another', e => pickPath(n, e.currentTarget)) : null,
+        act('Hide', 'Take this table off the diagram', () => hideTables([n.key]), 'btn small ghost'),
+      ].filter(Boolean));
+    }
+
+    function pickPath(n, anchor) {
+      const choices = full.nodes.filter(m => m !== n).sort((a, b) => (label(a) < label(b) ? -1 : 1))
+        .map(m => ({ key: m.key, label: label(m), links: linkCount(m) }));
+      Promise.resolve(opts.onPick({ title: `Path from ${label(n)} to another table`, choices, anchor, one: true })).then(keys => {
+        if (!keys || !keys.length || stopped) return;
+        if (!showPath(n.key, keys[0]) && opts.onNote) {
+          opts.onNote(`No chain of up to 6 keys joins ${label(n)} and ${label(full.byKey.get(keys[0]))}.`);
+        }
+      });
     }
 
     // ---- focus and search
@@ -827,26 +1461,36 @@
       if (stopped) return;
       const n = key ? model.byKey.get(key) || null : null;
       focused = n;
+      markFocus();
       const near = n ? new Set([n, ...n.out, ...n.in]) : null;
-      world.classList.toggle('focusing', !!n);
+      if (n && fly) flyTo(fitView(bounds([...near]), 90, 1.15));
+      drawBar();
+      if (opts.onFocus) opts.onFocus(n ? n.key : null);
+      // The dots along its lines keep moving for as long as the table is in focus.
+      kick(n && !still() ? () => focused === n : undefined);
+    }
+
+    // The focused table, the tables linked to it and their lines stand out.
+    // Done again when tables come or go, so a table added beside it is lit too.
+    function markFocus() {
+      const n = focused;
+      const near = n ? new Set([n, ...n.out, ...n.in]) : null;
+      stage.classList.toggle('focusing', !!n);
       for (const m of model.nodes) {
         m.el.classList.toggle('focus', m === n);
         m.el.classList.toggle('lit', !!near && near.has(m) && m !== n);
       }
-      for (const l of model.links) {
-        const hot = !!n && (l.from === n || l.to === n);
-        l.g.classList.toggle('hot', hot);
-        // A focused table's lines are drawn over the others.
-        if (hot) svg.append(l.g);
-      }
-      if (n && fly) flyTo(fitView(bounds([...near]), 90, 1.15));
-      if (opts.onFocus) opts.onFocus(n ? n.key : null);
-      kick();
+      for (const l of full.links) l.hot = !!n && (l.from === n || l.to === n);
     }
 
+    let query = '';
+
     function search(text) {
-      const q = String(text || '').trim().toLowerCase();
-      world.classList.toggle('searching', !!q);
+      query = String(text || '');
+      const q = query.trim().toLowerCase();
+      searching = !!q;
+      stage.classList.toggle('searching', searching);
+      kick();
       let found = 0;
       for (const n of model.nodes) {
         const hit = !!q && label(n).toLowerCase().includes(q);
@@ -856,15 +1500,28 @@
       return found;
     }
 
-    // Flies to the best match: the exact name, then a name starting with the text, then one holding it.
-    function searchGo(text) {
+    // The best match among every table of the database: the exact name,
+    // then a name starting with the text, then one holding it. A shown table
+    // wins over a hidden one that matches as well.
+    function bestMatch(text) {
       const q = String(text || '').trim().toLowerCase();
-      if (!q) return false;
-      const names = model.nodes.map(n => [n, label(n).toLowerCase()]);
+      if (!q) return null;
+      const names = [...model.nodes, ...full.nodes.filter(n => !model.byKey.has(n.key))].map(n => [n, label(n).toLowerCase()]);
       const hit = names.find(([, t]) => t === q) || names.find(([, t]) => t.startsWith(q)) || names.find(([, t]) => t.includes(q));
-      if (!hit) return false;
+      return hit ? hit[0] : null;
+    }
+
+    // Flies to the best match. A hidden table is shown first: beside what
+    // links it, or with its neighbours when nothing is shown yet.
+    function searchGo(text) {
+      const n = bestMatch(text);
+      if (!n) return false;
       search('');
-      focus(hit[0].key);
+      if (!model.nodes.length) showAround(n.key);
+      else {
+        addTables([n.key]);
+        focus(n.key);
+      }
       return true;
     }
 
@@ -876,7 +1533,7 @@
 
     stage.addEventListener('pointerdown', e => {
       pressed = null;
-      if (e.button !== 0 || e.target.closest('.dg-hud, .dg-minimap')) return;
+      if (e.button !== 0 || e.target.closest('.dg-hud, .dg-minimap, .dg-more')) return;
       const box = e.target.closest('.dg-node');
       pressed = box ? nodeOf.get(box) : null;
       flight = null;
@@ -886,7 +1543,10 @@
     });
 
     stage.addEventListener('pointermove', e => {
-      if (!drag) return;
+      if (!drag) {
+        pointAt(e);
+        return;
+      }
       const dx = e.clientX - drag.x;
       const dy = e.clientY - drag.y;
       if (!drag.moved && Math.hypot(dx, dy) < 4) return;
@@ -937,7 +1597,8 @@
         return;
       }
       if (d.node) {
-        (saved.positions[saved.layout] ||= {})[d.node.key] = [Math.round(d.node.x), Math.round(d.node.y)];
+        saved.at[d.node.key] = [Math.round(d.node.x), Math.round(d.node.y)];
+        saved.arranged = false;
         changed();
         return;
       }
@@ -957,7 +1618,7 @@
     });
 
     stage.addEventListener('dblclick', e => {
-      if (e.target.closest('.dg-hud, .dg-minimap')) return;
+      if (e.target.closest('.dg-hud, .dg-minimap, .dg-more')) return;
       if (pressed && opts.onOpen) opts.onOpen({ schema: pressed.schema, name: pressed.name });
     });
 
@@ -997,32 +1658,22 @@
 
     // ---- minimap
 
-    let colors = null;
     let map = null;
 
     function drawMinimap() {
       const ratio = devicePixelRatio || 1;
       const w = mini.clientWidth;
       const h = mini.clientHeight;
-      if (!w || !model.nodes.length) return;
+      if (!w) return;
       if (mini.width !== Math.round(w * ratio)) {
         mini.width = Math.round(w * ratio);
         mini.height = Math.round(h * ratio);
       }
-      // The colours follow the page's theme. They are read again whenever the pointer comes back.
-      if (!colors) {
-        const probe = el('i');
-        stage.append(probe);
-        probe.style.color = 'var(--accent)';
-        const accent = getComputedStyle(probe).color;
-        probe.style.color = 'var(--ink)';
-        const ink = getComputedStyle(probe).color;
-        probe.remove();
-        colors = { accent, ink };
-      }
+      paints();
       const c = mini.getContext('2d');
       c.setTransform(ratio, 0, 0, ratio, 0, 0);
       c.clearRect(0, 0, w, h);
+      if (!model.nodes.length) return;
       let x0 = Infinity;
       let y0 = Infinity;
       let x1 = -Infinity;
@@ -1051,6 +1702,14 @@
       c.strokeRect(ox + (-cam.x / cam.k) * s, oy + (-cam.y / cam.k) * s, (v.w / cam.k) * s, (v.h / cam.k) * s);
     }
 
+    stage.addEventListener('pointerleave', () => {
+      if (!overLine) return;
+      overLine = null;
+      tip.classList.remove('on');
+      stage.classList.remove('on-line');
+      kick();
+    });
+
     stage.addEventListener('pointerenter', () => {
       colors = null;
       kick();
@@ -1069,24 +1728,61 @@
       if (opts.onChange) opts.onChange(JSON.parse(JSON.stringify(saved)));
     }
 
-    arrange({ first: true });
-    reveal();
-    const start = opts.focus ? model.byKey.get(opts.focus) || null : null;
-    // The whole database when it fits at a zoom where names can be read.
-    // Otherwise the busiest table, with the minimap showing the rest.
-    let first = fitView(bounds(model.nodes));
-    if (first.k < 0.4) {
-      const busiest = model.nodes.reduce((a, b) => (b.out.length + b.in.length > a.out.length + a.in.length ? b : a));
-      first = { cx: busiest.tx + W / 2, cy: busiest.ty + busiest.h / 2, k: 0.4 };
+    // The view's own places when it has them, else the layout's.
+    showSet(keysShown());
+    const placed = saved.arranged ? null : placeRest();
+    if (placed) moveTo(placed, { jump: true });
+    else if (model.nodes.length) arrange({ jump: true });
+    if (dragged && typeof dragged === 'object') {
+      const pos = new Map();
+      for (const [k, p] of Object.entries(dragged)) {
+        const n = model.byKey.get(k);
+        if (n && Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1])) pos.set(n, { x: p[0], y: p[1] });
+      }
+      if (pos.size) {
+        moveTo(pos, { jump: true });
+        saved.arranged = false;
+      }
+      changed();
     }
+    reveal(model.nodes, true);
+    const start = opts.focus ? model.byKey.get(opts.focus) || null : null;
     const v = size();
-    // It opens close in and pulls back while the tables arrive.
-    cam.k = start || still() ? first.k : first.k * 1.8;
-    cam.x = v.w / 2 - first.cx * cam.k;
-    cam.y = v.h / 2 - first.cy * cam.k;
+    if (model.nodes.length) {
+      // Every table shown when they fit at a zoom where names can be read.
+      // Otherwise the busiest one, with the minimap showing the rest.
+      let first = fitView(bounds(model.nodes));
+      if (first.k < 0.4) {
+        const busiest = model.nodes.reduce((a, b) => (b.out.length + b.in.length > a.out.length + a.in.length ? b : a));
+        first = { cx: busiest.tx + W / 2, cy: busiest.ty + busiest.h / 2, k: 0.4 };
+      }
+      // It opens close in and pulls back while the tables arrive.
+      cam.k = start || still() ? first.k : first.k * 1.8;
+      cam.x = v.w / 2 - first.cx * cam.k;
+      cam.y = v.h / 2 - first.cy * cam.k;
+      if (start) setTimeout(() => focus(start.key), 350);
+      else if (!still()) setTimeout(() => flyTo(first, 1600, 1600), 120);
+    } else {
+      cam.x = v.w / 2;
+      cam.y = v.h / 2;
+    }
     kick();
-    if (start) setTimeout(() => focus(start.key), 350);
-    else if (!still()) setTimeout(() => flyTo(first, 1600, 1600), 120);
+    // A table asked for that is not shown yet joins the tables shown, or
+    // opens with its neighbours when there are none.
+    if (opts.focus && !start && full.byKey.has(opts.focus)) {
+      setTimeout(() => {
+        if (stopped) return;
+        if (!model.nodes.length) {
+          showAround(opts.focus);
+          return;
+        }
+        addTables([opts.focus]);
+        focus(opts.focus);
+      }, 0);
+    }
+
+    const validAt = at => Object.fromEntries(Object.entries(at && typeof at === 'object' ? at : {})
+      .filter(([k, p]) => full.byKey.has(k) && Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1])));
 
     return {
       focus: key => focus(key || null),
@@ -1094,6 +1790,8 @@
       fit,
       search,
       searchGo,
+      // How many tables are shown, and how many the database has.
+      count: () => ({ shown: model.nodes.length, total: full.nodes.length }),
       setLayout(name) {
         if (!LAYOUTS[name] || name === saved.layout) return;
         saved.layout = name;
@@ -1105,16 +1803,53 @@
       setDetail(detail) {
         if (!DETAILS.includes(detail) || detail === saved.detail) return;
         saved.detail = detail;
+        showSet(keysShown());
+        // Places the layout gave are worked out again; places of the view's own only move down out of the way.
+        if (saved.arranged) {
+          arrange();
+          fit();
+        } else {
+          moveTo(settle(places()));
+        }
+        changed();
+      },
+      arrange() {
+        focus(null, { fly: false });
         arrange();
         fit();
         changed();
       },
-      resetPositions() {
-        delete saved.positions[saved.layout];
+      showAround,
+      showAll() {
+        showSet(full.nodes.map(n => n.key));
         arrange();
+        fit();
         changed();
       },
-      moved: () => Object.keys(saved.positions[saved.layout] || {}).length > 0,
+      clear() {
+        showSet([]);
+        clearGroups();
+        changed();
+      },
+      // What a saved view keeps.
+      view: () => ({ tables: keysShown(), at: { ...saved.at }, layout: saved.layout, detail: saved.detail }),
+      // Shows a saved view: its tables at its places, at its detail.
+      openView(view) {
+        if (DETAILS.includes(view.detail)) saved.detail = view.detail;
+        if (LAYOUTS[view.layout]) saved.layout = view.layout;
+        const at = validAt(view.at);
+        showSet((view.tables || []).filter(k => full.byKey.has(k)));
+        saved.at = { ...saved.at, ...at };
+        const pos = placeRest() || new Map();
+        for (const n of model.nodes) if (n.placed && at[n.key]) pos.set(n, { x: at[n.key][0], y: at[n.key][1] });
+        if (model.nodes.length && !pos.size && !model.nodes.some(n => n.placed)) arrange();
+        else moveTo(pos);
+        saved.arranged = false;
+        clearGroups();
+        focus(null, { fly: false });
+        flyTo(fitView(bounds(model.nodes)));
+        changed();
+      },
       destroy() {
         stop();
         host.replaceChildren();
@@ -1122,5 +1857,5 @@
     };
   }
 
-  return { buildModel, layout, mount, SIZES: { W, HEAD, ROW, FOOT, BORDER } };
+  return { buildModel, viewOf, hubs, around, pathBetween, placeBeside, settle, layout, mount, SIZES: { W, HEAD, ROW, FOOT, BORDER } };
 });

@@ -2,7 +2,7 @@
 //     node --test
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { buildModel, layout, SIZES } = require('../assets/diagram.js');
+const { buildModel, viewOf, hubs, around, pathBetween, placeBeside, settle, layout, SIZES } = require('../assets/diagram.js');
 
 const LAYOUTS = ['flow', 'families', 'constellation'];
 const DETAILS = ['names', 'keys', 'all'];
@@ -168,3 +168,88 @@ test('a database of 400 tables lays out in under two seconds', () => {
     assert.ok(ms < 2000, `${name} took ${Math.round(ms)} ms`);
   }
 });
+
+// ------------------------------------------------------------ the view
+
+const keysOf = list => list.map(n => n.key);
+
+test('a view holds only its tables and the keys between them, and remembers every link', () => {
+  const full = buildModel(schema());
+  const view = viewOf(full, ['public.companies', 'public.roles', 'public.company_roles', 'public.nowhere']);
+  assert.deepEqual(keysOf(view.nodes), ['public.companies', 'public.roles', 'public.company_roles']);
+  assert.equal(view.links.length, 3);
+  assert.ok(view.partial);
+  const companies = view.byKey.get('public.companies');
+  assert.deepEqual(keysOf(companies.in).sort(), ['public.company_roles', 'public.roles']);
+  assert.equal(companies.allIn.length, 3, 'approval_workflows still points here, though it is not shown');
+  assert.equal(viewOf(full, keysOf(full.nodes)).partial, false);
+});
+
+test('a table with keys only to tables not shown sits with the unlinked ones, not the stand-alone ones', () => {
+  const full = buildModel(schema());
+  const view = viewOf(full, ['public.companies', 'public.config_fields']);
+  const { groups } = layout(view, 'flow', 'keys');
+  assert.deepEqual(groups.map(g => [g.label, g.note]), [['Unlinked tables', 'no keys to the tables shown']]);
+});
+
+test('the tables to start from are the ones most others point to', () => {
+  const full = buildModel(schema());
+  assert.deepEqual(keysOf(hubs(full, 2)), ['public.org_countries', 'public.companies']);
+});
+
+test('around a table: the table, what it points to, then what points to it, up to the limit', () => {
+  const full = buildModel(schema());
+  const keys = around(full, 'public.org_countries', 5);
+  assert.equal(keys.length, 5);
+  assert.deepEqual(keys.slice(0, 2), ['public.org_countries', 'public.countries']);
+  assert.deepEqual(around(full, 'public.nowhere'), []);
+});
+
+test('a path runs along keys either way, and is null past its length or with no link', () => {
+  const full = buildModel(schema());
+  assert.deepEqual(pathBetween(full, 'public.config_fields', 'public.approval_workflow_steps'),
+    ['public.config_fields', 'public.config_versions', 'public.org_countries', 'public.countries', 'public.approval_workflows', 'public.approval_workflow_steps']);
+  assert.equal(pathBetween(full, 'public.config_fields', 'public.approval_workflow_steps', 3), null);
+  assert.equal(pathBetween(full, 'public.audit_events', 'public.companies'), null);
+});
+
+test('tables added beside one go on its side, clear of every table there, and move none of them', () => {
+  const full = buildModel(schema());
+  const view = viewOf(full, keysOf(full.nodes).filter(k => !k.startsWith('public.policy_')));
+  const { pos } = layout(view, 'flow', 'keys');
+  const before = JSON.stringify([...pos.values()]);
+  const target = view.byKey.get('public.org_countries');
+  const added = full.nodes.filter(n => n.name.startsWith('policy_'));
+  setDetailTo(full, 'keys');
+  const placed = placeBeside(pos, target, added, -1);
+  assert.equal(JSON.stringify([...pos.values()]), before, 'the tables already out stay put');
+  assert.equal(placed.size, added.length);
+  const all = new Map([...pos, ...placed]);
+  for (const p of placed.values()) assert.ok(p.x < pos.get(target).x, 'tables pointing here go to its left');
+  assert.deepEqual(overlapsIn(all), []);
+});
+
+test('settle moves boxes down until none overlap', () => {
+  const full = buildModel(schema());
+  setDetailTo(full, 'all');
+  const pos = new Map(full.nodes.slice(0, 6).map((n, i) => [n, { x: (i % 2) * 40, y: i * 10 }]));
+  settle(pos);
+  assert.deepEqual(overlapsIn(pos), []);
+});
+
+function setDetailTo(model, detail) {
+  layout(model, 'flow', detail);
+}
+
+function overlapsIn(pos) {
+  const found = [];
+  const boxes = [...pos].map(([n, p]) => ({ n, ...p }));
+  for (let i = 0; i < boxes.length; i++) {
+    for (let j = i + 1; j < boxes.length; j++) {
+      const a = boxes[i];
+      const b = boxes[j];
+      if (a.x < b.x + SIZES.W && b.x < a.x + SIZES.W && a.y < b.y + b.n.h && b.y < a.y + a.n.h) found.push(`${a.n.name} and ${b.n.name}`);
+    }
+  }
+  return found;
+}

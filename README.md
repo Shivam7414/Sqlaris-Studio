@@ -3,7 +3,7 @@
 [![Tests](https://github.com/Shivam7414/Sqlaris-Studio/actions/workflows/tests.yml/badge.svg)](https://github.com/Shivam7414/Sqlaris-Studio/actions/workflows/tests.yml)
 
 A database browser for PostgreSQL and MySQL/MariaDB that runs on your own machine.
-Browse and edit tables, draw a whole database as a diagram, run SQL, and keep the databases
+Browse and edit tables, explore a database as a diagram, run SQL, and keep the databases
 in shape.
 
 It is plain PHP and plain JavaScript: no Composer, no npm, no build step. Put the folder
@@ -94,10 +94,24 @@ one row fails, nothing is kept and the error names the row.
 
 ![Every table and foreign key of the shop database](docs/screenshots/diagram.png)
 
-A diagram of every table and foreign key in the database, in three layouts: Flow,
+A diagram of the tables and foreign keys in the database, in three layouts: Flow,
 Families (grouped by the first word of the table name) and Constellation (linked tables
 pull together). Zoom, pan, drag tables where you want them, and use the minimap to move
-around a big database. The browser remembers where you put each table.
+around. The browser remembers which tables you had out and where you put each one.
+
+A database of up to 40 tables opens whole. A larger one opens on a start panel instead,
+because nobody can read a few hundred tables in one picture: find a table, or pick one
+of the tables most others point to, and it shows with the tables linked to it. From there:
+
+- The + on the left of a table shows the hidden tables that point to it, and the + on the
+  right the ones it points to. They come in beside it, and the tables already out stay
+  where they are. Past 20, you pick which ones.
+- Click a table for its bar: open it, show its hidden links, hide the rest, hide it, or
+  "Path to..." another table, which brings out the shortest chain of keys between them.
+- Finding a table that is not out yet brings it out.
+- Views keep a set of tables and where they sit under a name, such as "Payroll". They
+  are kept in `diagram-views.json` next to `layout.json`, so every browser sees them.
+  While some tables are hidden, the Views menu can show them all.
 
 ### SQL
 
@@ -105,6 +119,16 @@ around a big database. The browser remembers where you put each table.
 
 A SQL editor (CodeMirror) with autocomplete for tables, columns and aliases, EXPLAIN and
 a history of the last 50 queries. It runs read only unless you turn on "Allow changes".
+
+With changes allowed, the whole script runs in one transaction: it is kept if every
+statement works and undone if one fails. Each run is its own request, so a transaction
+cannot stay open while you look at the result and decide. The script can end the
+transaction itself, with a COMMIT or ROLLBACK of its own or, on MySQL, a statement such
+as CREATE TABLE that commits by itself. Then the result says the script ended the
+transaction, and if a later statement fails, the error says part of the script may have
+been kept. A script that ends the transaction and then starts a new one with BEGIN cannot
+be told apart from one that did neither, so leave BEGIN, COMMIT and ROLLBACK out when you
+want the whole script kept or undone together.
 
 ### Health and activity
 
@@ -183,7 +207,8 @@ docker run --rm -p 127.0.0.1:8765:8765 \
 `host.docker.internal` is your own computer as seen from the container. On Podman it is
 `host.containers.internal`, and on Docker for Linux add
 `--add-host=host.docker.internal:host-gateway`. To group and colour databases, mount your
-own `config.php` over `/app/config.php`. The sidebar layout is kept in the `/data` volume.
+own `config.php` over `/app/config.php`. The sidebar layout and the saved diagram views are
+kept in the `/data` volume.
 
 Always publish the port on `127.0.0.1` as above. Inside a container your requests arrive
 from the container network's gateway, not from 127.0.0.1, so the image lets that one
@@ -208,7 +233,8 @@ name your databases, so git ignores it. Each option is described in `config.exam
 | `sql_row_limit`, `export_row_limit`, `import_row_limit` | Row limits for the SQL tab, exports and imports. |
 
 Your own arrangement of the sidebar (custom groups, order, hidden databases) is saved in
-`layout.json` next to `config.php`. It is ignored by git too.
+`layout.json` next to `config.php`, and the diagram views you save in
+`diagram-views.json`. Git ignores both.
 
 ## Themes and colours
 
@@ -289,7 +315,7 @@ here.
 
 - Requests are only accepted from `localhost`, and the Host header is checked, so a web
   page cannot reach the viewer by pointing its own domain at 127.0.0.1.
-- `.env` and `layout.json` are never served. `.htaccess` blocks them under Apache, and
+- `.env`, `layout.json` and `diagram-views.json` are never served. `.htaccess` blocks them under Apache, and
   `router.php` serves only the page, the API and `assets/` under PHP's built-in server.
 - Every request needs a signed-in session, and the API only accepts calls from its own
   page.
@@ -362,7 +388,8 @@ PDO afterwards, not through the viewer. It covers:
 - Hostile input: SQL in table names, column names, sort directions, filter operators, row
   keys, page sizes, column types and values, and names that contain the quote character.
 - That the SQL tab changes nothing unless "Allow changes" is on, even with a `commit;` in
-  the script.
+  the script, and that with it on, an error after the script's own `commit;`, or on MySQL
+  after a CREATE TABLE, says part of the script may have been kept.
 
 The unit tests always run. The API tests run against each server you give it in
 `TEST_PGSQL_*` and `TEST_MYSQL_*`, the same names as in `.env` with `TEST_` in front, set

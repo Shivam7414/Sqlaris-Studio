@@ -564,6 +564,21 @@ final class DbvMysql extends DbvDriver
         return $statement->nextRowset();
     }
 
+    public function inTransaction(): bool
+    {
+        // PDO reads the flag the server sends with each successful answer. An
+        // error carries none, so after a failed CREATE TABLE, which has already
+        // committed, PDO still says a transaction is open. One more statement
+        // brings the flag up to date.
+        try {
+            $this->pdo->exec('do 0');
+        } catch (PDOException) {
+            // A connection that cannot answer keeps whatever flag it had.
+        }
+
+        return $this->pdo->inTransaction();
+    }
+
     public function maintain(?array $t, string $op): array
     {
         $names = $t === null

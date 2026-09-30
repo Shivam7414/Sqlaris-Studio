@@ -198,6 +198,12 @@ abstract class DbvDriver
         return false;
     }
 
+    /** Whether the server has a transaction open on this connection right now. */
+    public function inTransaction(): bool
+    {
+        return $this->pdo->inTransaction();
+    }
+
     /** The placeholder for a value going into a column. */
     public function param(array $column): string
     {

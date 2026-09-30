@@ -366,7 +366,8 @@ function dbv_action_values(DbvDriver $d, array $t, array $req): array
 /**
  * Runs what the SQL tab sent. Unless the page asked for writes, the
  * connection is read only first, so a stray UPDATE is refused by the database
- * itself. Either way nothing is kept unless writes were asked for.
+ * itself. Either way nothing is kept unless writes were asked for. With
+ * writes, a script that ends the transaction itself is reported as "ended".
  */
 function dbv_action_sql(DbvDriver $d, array $req): array
 {
@@ -427,16 +428,28 @@ function dbv_action_sql(DbvDriver $d, array $req): array
             $affected = $statement->rowCount();
         } while ($d->nextResult($statement));
 
-        // A statement such as CREATE TABLE ends the transaction on MySQL by itself.
-        if ($pdo->inTransaction()) {
-            $write ? $pdo->commit() : $pdo->rollBack();
-        }
+        // The script can end the transaction before we do: a COMMIT or ROLLBACK
+        // of its own, or on MySQL a statement such as CREATE TABLE, which
+        // commits by itself. Then the script decided what was kept, not us.
+        // A script that then starts a new transaction cannot be told apart.
+        $ended = ! $d->inTransaction();
     } catch (Throwable $e) {
-        if ($pdo->inTransaction()) {
+        if ($d->inTransaction()) {
             $pdo->rollBack();
+        } elseif ($write) {
+            // Rolling back now cannot undo what the script committed before the
+            // error, so the message must not let it look as if nothing changed.
+            throw new DbvError("The script ended the transaction itself before this error, so part of the script may have been kept.\n"
+                .($e instanceof PDOException ? DbvDriver::message($e) : $e->getMessage()), 0, $e);
         }
 
         throw $e;
+    }
+
+    // Outside the try, so a COMMIT the database refuses, such as one that
+    // breaks a deferred constraint, is not taken for the script's own.
+    if (! $ended) {
+        $write ? $pdo->commit() : $pdo->rollBack();
     }
 
     return [
@@ -444,7 +457,8 @@ function dbv_action_sql(DbvDriver $d, array $req): array
         'rows' => $rows,
         'more' => $more,
         'affected' => $affected,
-        'committed' => $write,
+        'committed' => $write && ! $ended,
+        'ended' => $write && $ended,
         'plan' => $explain,
         'ms' => (int) round((hrtime(true) - $started) / 1e6),
     ];
@@ -846,7 +860,8 @@ function dbv_action_schema(DbvDriver $d): array
     return ['tables' => $d->schema()];
 }
 
-function dbv_action_diagram(DbvDriver $d): array
+/** Every table for the diagram, and the views of it saved for this database. */
+function dbv_action_diagram(DbvDriver $d, string $db): array
 {
-    return ['tables' => $d->diagram()];
+    return ['tables' => $d->diagram(), 'views' => dbv_views($db)];
 }

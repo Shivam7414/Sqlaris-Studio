@@ -1,6 +1,6 @@
 # Apache sends any file in this folder as it is. .env holds passwords, so it and every
-# other dotfile are refused, and so is layout.json, which names your databases.
-# src/ has its own .htaccess.
-<FilesMatch "^(\.|layout\.json)">
+# other dotfile are refused, and so are layout.json and diagram-views.json, which name
+# your databases and tables. src/ has its own .htaccess.
+<FilesMatch "^(\.|layout\.json|diagram-views\.json)">
     Require all denied
 </FilesMatch>

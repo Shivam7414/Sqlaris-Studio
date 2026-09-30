@@ -3,6 +3,8 @@
 config.php
 layout.json
 layout.json.tmp
+diagram-views.json
+diagram-views.json.*
 
 .git
 .github
@@ -10,3 +12,5 @@ docs
 tests
 docker/demo
 compose.yaml
+.claude
+CLAUDE.md

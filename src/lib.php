@@ -412,6 +412,176 @@ function dbv_save_layout(array $layout): array
     return $layout;
 }
 
+/** The diagram views you save in the page, by database. Git ignores it. SQLARIS_VIEWS moves it, for a container. */
+define('DBV_VIEWS_FILE', (string) (getenv('SQLARIS_VIEWS') ?: __DIR__.'/../diagram-views.json'));
+
+/** More views than this on one database is a mistake, not a collection. */
+const DBV_MOST_VIEWS = 200;
+
+/**
+ * Keeps only the shape the page reads, so a file edited by hand or a bad
+ * request can never break the diagram: a name, the tables by "schema.name",
+ * where each of them sits, and the layout and detail. Null when there is no
+ * name or no table.
+ */
+function dbv_clean_view(mixed $view): ?array
+{
+    if (! is_array($view) || ! preg_match('/^\S.{0,59}$/u', trim((string) ($view['name'] ?? '')), $name)) {
+        return null;
+    }
+
+    $isKey = fn (mixed $key): bool => is_string($key) && $key !== '' && strlen($key) <= 300;
+    $tables = array_slice(array_values(array_unique(array_filter((array) ($view['tables'] ?? []), $isKey))), 0, 5000);
+
+    if ($tables === []) {
+        return null;
+    }
+
+    $shown = array_flip($tables);
+    $at = [];
+
+    foreach ((array) ($view['at'] ?? []) as $key => $place) {
+        $x = $place[0] ?? null;
+        $y = $place[1] ?? null;
+
+        if (isset($shown[$key]) && is_array($place) && is_numeric($x) && is_numeric($y) && abs((float) $x) < 1e7 && abs((float) $y) < 1e7) {
+            $at[$key] = [(int) round((float) $x), (int) round((float) $y)];
+        }
+    }
+
+    $layout = (string) ($view['layout'] ?? '');
+    $detail = (string) ($view['detail'] ?? '');
+
+    return [
+        'name' => $name[0],
+        'tables' => $tables,
+        // An object, so the page gets {} and not [] when no table has a place.
+        'at' => (object) $at,
+        'layout' => in_array($layout, ['flow', 'families', 'constellation'], true) ? $layout : 'flow',
+        'detail' => in_array($detail, ['names', 'keys', 'all'], true) ? $detail : 'keys',
+    ];
+}
+
+/** Every saved view, by database id, each list in name order. */
+function dbv_read_views(): array
+{
+    $saved = is_file(DBV_VIEWS_FILE) ? json_decode((string) file_get_contents(DBV_VIEWS_FILE), true) : null;
+    $all = [];
+
+    foreach (is_array($saved) ? $saved : [] as $db => $views) {
+        $list = [];
+
+        foreach (is_array($views) ? $views : [] as $view) {
+            $view = dbv_clean_view($view);
+
+            if ($view !== null) {
+                $list[strtolower($view['name'])] = $view;
+            }
+        }
+
+        if (is_string($db) && $list !== []) {
+            ksort($list, SORT_STRING);
+            $all[$db] = array_values($list);
+        }
+    }
+
+    return $all;
+}
+
+/** The views saved for one database. */
+function dbv_views(string $db): array
+{
+    return dbv_read_views()[$db] ?? [];
+}
+
+/**
+ * Reads every view, lets $change alter the list of one database, and writes
+ * them back, holding a lock the whole time so two tabs saving at once do not
+ * lose one another's view. Gives that database's views after the change.
+ */
+function dbv_change_views(string $db, callable $change): array
+{
+    dbv_find($db);
+    $lock = @fopen(DBV_VIEWS_FILE.'.lock', 'c');
+
+    if ($lock === false || ! flock($lock, LOCK_EX)) {
+        throw new DbvError('Could not write diagram-views.json. Check that the viewer folder can be written to.');
+    }
+
+    try {
+        // A file that does not read, say after a hand edit, is never written
+        // over: that would lose every view of every database in it.
+        $text = is_file(DBV_VIEWS_FILE) ? (string) file_get_contents(DBV_VIEWS_FILE) : '';
+
+        if (trim($text) !== '' && ! is_array(json_decode($text, true))) {
+            throw new DbvError('Could not read diagram-views.json, so nothing was changed. Fix the file or delete it.');
+        }
+
+        $all = dbv_read_views();
+        $byName = [];
+
+        foreach ($all[$db] ?? [] as $view) {
+            $byName[strtolower($view['name'])] = $view;
+        }
+
+        $byName = $change($byName);
+        ksort($byName, SORT_STRING);
+
+        if ($byName === []) {
+            unset($all[$db]);
+        } else {
+            $all[$db] = array_values($byName);
+        }
+
+        // Written whole to a second file and then moved over, so a failed write never leaves half a file.
+        $temp = DBV_VIEWS_FILE.'.tmp';
+        $json = json_encode((object) $all, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+        $written = $json === false ? false : file_put_contents($temp, $json."\n");
+
+        if ($written === false || ! rename($temp, DBV_VIEWS_FILE)) {
+            throw new DbvError('Could not save diagram-views.json. Check that the viewer folder can be written to.');
+        }
+
+        return $all[$db] ?? [];
+    } finally {
+        flock($lock, LOCK_UN);
+        fclose($lock);
+    }
+}
+
+/** Saves a view under its name, over one of the same name. */
+function dbv_save_view(string $db, array $view): array
+{
+    $clean = dbv_clean_view($view);
+
+    if ($clean === null) {
+        throw new DbvError(trim((string) ($view['name'] ?? '')) === ''
+            ? 'Give the view a name.'
+            : 'A view needs a name of up to 60 characters and at least one table.');
+    }
+
+    return dbv_change_views($db, function (array $views) use ($clean): array {
+        $key = strtolower($clean['name']);
+
+        if (! isset($views[$key]) && count($views) >= DBV_MOST_VIEWS) {
+            throw new DbvError('This database has '.DBV_MOST_VIEWS.' saved views, the most it can keep. Delete one first.');
+        }
+
+        $views[$key] = $clean;
+
+        return $views;
+    });
+}
+
+function dbv_delete_view(string $db, string $name): array
+{
+    return dbv_change_views($db, function (array $views) use ($name): array {
+        unset($views[strtolower(trim($name))]);
+
+        return $views;
+    });
+}
+
 /** What the page needs from config.php besides the databases. */
 function dbv_settings(): array
 {

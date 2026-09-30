@@ -48,6 +48,15 @@ try {
         dbv_send(['layout' => dbv_save_layout((array) ($req['layout'] ?? []))]);
     }
 
+    // Saved diagram views live in a file of the viewer's own, so these do not connect at all.
+    if ($action === 'save_view') {
+        dbv_send(['views' => dbv_save_view((string) ($req['db'] ?? ''), (array) ($req['view'] ?? []))]);
+    }
+
+    if ($action === 'delete_view') {
+        dbv_send(['views' => dbv_delete_view((string) ($req['db'] ?? ''), (string) ($req['name'] ?? ''))]);
+    }
+
     // These two work on the server, so they connect to it rather than to the database.
     if ($action === 'create_database') {
         dbv_send(dbv_action_create_database($req));
@@ -74,7 +83,7 @@ try {
         'import' => dbv_action_import($d, $table(), $req),
         'truncate' => dbv_action_truncate($d, $table(), $req),
         'schema' => dbv_action_schema($d),
-        'diagram' => dbv_action_diagram($d),
+        'diagram' => dbv_action_diagram($d, (string) $req['db']),
         'export' => dbv_action_export($d, $table(), $req),
         'sql' => dbv_action_sql($d, $req),
         'maintain' => dbv_action_maintain($d, isset($req['table']) ? $table() : null, $req),

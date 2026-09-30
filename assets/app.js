@@ -3807,12 +3807,25 @@
 
   // ----------------------------------------------------------------- diagram
 
-  // The catalog of each database, read once and read again after the list of tables changes.
+  // The catalog of each database and the views of it you saved, read once
+  // and read again after the list of tables changes.
   const diagramCache = {};
-  const loadDiagram = () => (diagramCache[S.db] ??= api('diagram', { db: S.db }).then(r => r.tables).catch(e => {
+  const loadDiagram = () => (diagramCache[S.db] ??= api('diagram', { db: S.db }).catch(e => {
     delete diagramCache[S.db];
     throw e;
   }));
+
+  // A saved or deleted view changes the list the cached answer holds.
+  const cacheViews = (db, views) => {
+    if (diagramCache[db]) diagramCache[db] = diagramCache[db].then(answer => ({ ...answer, views }));
+  };
+
+  // View names are the same when they differ only in the case of A to Z, as the server sees them.
+  const viewName = name => name.replace(/[A-Z]/g, c => c.toLowerCase());
+
+  // A database with more tables than this opens on the start panel. Nobody
+  // reads a few hundred boxes at once, and drawing them all is slow too.
+  const DIAGRAM_WHOLE = 40;
 
   // The diagram on screen, from assets/diagram.js, or null.
   let diagram = null;
@@ -3820,14 +3833,82 @@
   const showInDiagram = t => go({ table: null, tab: 'diagram', ...fresh, focus: tableKey(t) });
   const diagramButton = t => h('button', {
     class: 'btn small',
-    title: 'The diagram of the whole database, with this table in focus',
+    title: 'The diagram, with this table and the tables linked to it',
     onclick: () => showInDiagram(t),
   }, icon('diagram'), 'Show in diagram');
+
+  // Asks which tables to show, from a list too long to show all at once. one
+  // asks for a single table. Gives the keys picked.
+  function pickTables({ title, choices, anchor, one = false }) {
+    return new Promise(resolve => {
+      const picked = new Set();
+      const list = h('div', { class: 'col-list' });
+      const done = keys => {
+        closePopover();
+        resolve(keys);
+      };
+      const find = h('input', {
+        class: 'input',
+        type: 'search',
+        placeholder: 'Find a table',
+        spellcheck: false,
+        oninput: () => draw(),
+        onkeydown: e => {
+          if (e.key !== 'Enter') return;
+          e.preventDefault();
+          const first = matches()[0];
+          if (first && one) done([first.key]);
+        },
+      });
+      const matches = () => {
+        const q = find.value.trim().toLowerCase();
+        return choices.filter(c => c.label.toLowerCase().includes(q));
+      };
+      const showPicked = h('button', { class: 'btn small primary', disabled: true, onclick: () => done([...picked]) }, 'Show checked');
+      const check = c => h('label', { class: 'check' },
+        h('input', {
+          type: 'checkbox',
+          checked: picked.has(c.key),
+          onchange: e => {
+            if (e.target.checked) picked.add(c.key);
+            else picked.delete(c.key);
+            showPicked.disabled = !picked.size;
+            showPicked.textContent = picked.size ? `Show ${plural(picked.size, 'table')}` : 'Show checked';
+          },
+        }),
+        h('span', { class: 'mono' }, c.label),
+        h('small', null, plural(c.links, 'link')));
+      const choose = c => h('button', { class: 'menu-item', onclick: () => done([c.key]) },
+        h('span', { class: 'grow mono' }, c.label), h('small', { class: 'faint' }, plural(c.links, 'link')));
+      const draw = () => {
+        const shown = matches().slice(0, 300);
+        put(list, shown.length ? shown.map(one ? choose : check) : h('div', { class: 'menu-error' }, 'No table matches.'));
+      };
+      draw();
+      openPopover(anchor, h('div', { class: 'menu col-menu' },
+        h('div', { class: 'menu-title' }, title),
+        find,
+        one ? null : h('div', { class: 'menu-actions' },
+          showPicked,
+          h('button', { class: 'btn small', onclick: () => done(choices.map(c => c.key)) }, `Show all ${fmtN(choices.length)}`)),
+        list));
+    });
+  }
 
   async function renderDiagram() {
     const db = S.db;
     const saveKey = 'diagram:' + db;
-    const saved = store.get(saveKey, {});
+    // What this browser remembers: the diagram's own state, and the name of
+    // the saved view it came from, if any.
+    const remembered = store.get(saveKey, null);
+    let views = [];
+    let current = remembered && remembered.view ? remembered.view : null;
+    let last = remembered || {};
+    const remember = state => {
+      last = state;
+      store.set(saveKey, { ...state, view: current });
+    };
+
     const search = h('input', {
       class: 'input',
       type: 'search',
@@ -3853,33 +3934,212 @@
       },
     });
     UI.diagramSearch = search;
-    const reset = h('button', {
+
+    // The layout and detail switches, drawn again when a saved view brings its own.
+    const switches = h('div', { class: 'toolbar-group' });
+    const drawSwitches = () => put(switches,
+      segmented([['flow', 'Flow'], ['families', 'Families'], ['constellation', 'Constellation']], last.layout || 'flow',
+        v => { if (diagram) diagram.setLayout(v); }),
+      h('span', { class: 'toolbar-label' }, 'Detail'),
+      segmented([['names', 'Names'], ['keys', 'Keys'], ['all', 'All columns']], last.detail || 'keys',
+        v => { if (diagram) diagram.setDetail(v); }));
+    drawSwitches();
+
+    const viewsButton = h('button', {
+      class: 'btn',
+      title: 'Open, save or delete a view: a set of tables and where they sit',
+      onclick: e => openViewsMenu(e.currentTarget),
+    }, icon('list'), h('span', null, 'Views'), icon('down'));
+    const drawViewsButton = () => { viewsButton.querySelector('span').textContent = current || 'Views'; };
+    drawViewsButton();
+    const arrange = h('button', {
       class: 'btn ghost',
-      hidden: true,
-      title: 'Put the tables you dragged back where the layout puts them',
-      onclick: () => { if (diagram) diagram.resetPositions(); },
-    }, icon('refresh'), 'Reset positions');
+      title: 'Lay out the tables shown again with the chosen layout',
+      onclick: () => { if (diagram) diagram.arrange(); },
+    }, icon('refresh'), 'Arrange again');
     const host = h('div', { class: 'diagram-host' }, skeleton('cards', 'Reading every table'));
 
     put(UI.view, h('div', { class: 'diagram-view' },
       h('div', { class: 'toolbar' },
-        segmented([['flow', 'Flow'], ['families', 'Families'], ['constellation', 'Constellation']], saved.layout || 'flow',
-          v => { if (diagram) diagram.setLayout(v); }),
-        h('span', { class: 'toolbar-label' }, 'Detail'),
-        segmented([['names', 'Names'], ['keys', 'Keys'], ['all', 'All columns']], saved.detail || 'keys',
-          v => { if (diagram) diagram.setDetail(v); }),
+        switches,
         h('label', { class: 'search' }, icon('search'), search),
         h('div', { class: 'spacer' }),
-        reset),
+        arrange,
+        viewsButton),
       host));
 
+    let start = null;
+    let tables = [];
+
+    const closeStart = () => {
+      if (start) start.remove();
+      start = null;
+    };
+
+    const openView = view => {
+      current = view.name;
+      closeStart();
+      diagram.openView(view);
+      drawSwitches();
+      drawViewsButton();
+    };
+
+    // Saves the tables on screen under a name, over a view of the same name after asking.
+    async function saveView(name) {
+      if (!diagram || !diagram.count().shown) return;
+      const same = views.find(v => viewName(v.name) === viewName(name));
+      if (same && same.name !== current && !await confirmBox({
+        title: `Replace the view ${same.name}?`,
+        body: 'A view with this name is saved already. Saving puts the tables on screen in its place.',
+        confirm: 'Replace view',
+      })) return;
+      try {
+        const r = await api('save_view', { db, view: { name, ...diagram.view() } });
+        views = r.views;
+        cacheViews(db, views);
+        current = (views.find(v => viewName(v.name) === viewName(name)) || { name }).name;
+        remember(last);
+        drawViewsButton();
+        toast(`Saved the view ${current}.`, 'ok');
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+    }
+
+    async function deleteView(name) {
+      if (!await confirmBox({
+        title: `Delete the view ${name}?`,
+        body: 'Only the saved view goes. The tables and the diagram on screen stay as they are.',
+        confirm: 'Delete view',
+        danger: true,
+      })) return;
+      try {
+        views = (await api('delete_view', { db, name })).views;
+        cacheViews(db, views);
+        if (current === name) current = null;
+        remember(last);
+        drawViewsButton();
+        if (start) drawStart();
+        toast(`Deleted the view ${name}.`, 'ok');
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+    }
+
+    function openViewsMenu(anchor) {
+      if (!diagram) return;
+      const { shown, total } = diagram.count();
+      openPopover(anchor, menuList([
+        { title: views.length ? 'Saved views' : 'No saved views yet' },
+        views.map(v => ({
+          label: v.name,
+          icon: v.name === current ? 'check' : 'blank',
+          kbd: fmtN(v.tables.length),
+          hint: `Open this view of ${plural(v.tables.length, 'table')}`,
+          run: () => openView(v),
+        })),
+        'sep',
+        current && shown ? { label: `Save ${current}`, icon: 'download', hint: 'Save the tables on screen, and where they sit, over this view', run: () => saveView(current) } : null,
+        shown ? {
+          label: 'Save as a new view...',
+          icon: 'plus',
+          hint: 'Save the tables on screen, and where they sit, under a name',
+          run: async () => {
+            const name = await askText({ title: 'Save as a new view', value: '', confirm: 'Save view' });
+            if (name) saveView(name);
+          },
+        } : null,
+        current ? { label: `Delete ${current}`, icon: 'trash', danger: true, run: () => deleteView(current) } : null,
+        'sep',
+        shown < total ? { label: `Show all ${plural(total, 'table')}`, icon: 'diagram', run: () => { current = null; drawViewsButton(); diagram.showAll(); } } : null,
+        shown ? { label: 'Start over', icon: 'x', hint: 'Clear the diagram and pick a table to start from', run: () => { current = null; drawViewsButton(); diagram.clear(); } } : null,
+      ]), { alignRight: true });
+    }
+
+    // With nothing shown, a panel to start from: find a table, pick one that
+    // many others point to, or open a saved view.
+    function drawStart() {
+      const model = DbvDiagram.buildModel(tables);
+      const label = n => nameIn(n.schema, n.name);
+      const results = h('div', { class: 'menu dg-start-list' });
+      const pick = key => {
+        closeStart();
+        current = null;
+        drawViewsButton();
+        diagram.showAround(key);
+      };
+      const row = n => h('button', { class: 'menu-item', title: `Show ${label(n)} and the tables linked to it`, onclick: () => pick(n.key) },
+        icon(String(n.kind).includes('view') ? 'view' : 'table'),
+        h('span', { class: 'grow mono' }, label(n)),
+        h('small', { class: 'faint' }, n.allIn.length === 1 ? '1 table points here' : n.allIn.length ? `${fmtN(n.allIn.length)} tables point here` : plural(n.allOut.length, 'link')));
+      const find = h('input', {
+        class: 'input',
+        type: 'search',
+        placeholder: 'Find a table',
+        spellcheck: false,
+        oninput: () => draw(),
+        onkeydown: e => {
+          if (e.key !== 'Enter') return;
+          e.preventDefault();
+          const first = results.querySelector('.menu-item');
+          if (first) first.click();
+        },
+      });
+      const draw = () => {
+        const q = find.value.trim().toLowerCase();
+        if (!q) {
+          put(results, h('div', { class: 'menu-title' }, 'Most linked'), DbvDiagram.hubs(model, 8).map(row));
+          return;
+        }
+        const named = model.nodes.map(n => [n, label(n).toLowerCase()]);
+        const hits = [
+          ...named.filter(([, t]) => t.startsWith(q)),
+          ...named.filter(([, t]) => !t.startsWith(q) && t.includes(q)),
+        ].slice(0, 12).map(([n]) => n);
+        put(results, hits.length ? hits.map(row) : h('div', { class: 'menu-error' }, 'No table matches.'));
+      };
+      draw();
+      const panel = h('div', { class: 'dg-start' },
+        h('h3', null, 'Start from a table'),
+        h('p', { class: 'muted' }, (model.nodes.length > DIAGRAM_WHOLE ? `${plural(model.nodes.length, 'table')} are too many to read in one picture. ` : '')
+          + 'Pick a table, and it shows with the tables linked to it. A + on a table then shows the ones still hidden.'),
+        h('label', { class: 'search' }, icon('search'), find),
+        results,
+        views.length ? h('div', { class: 'menu' },
+          h('div', { class: 'menu-title' }, 'Saved views'),
+          views.map(v => h('button', { class: 'menu-item', title: `Open this view of ${plural(v.tables.length, 'table')}`, onclick: () => openView(v) },
+            icon('list'), h('span', { class: 'grow' }, v.name), h('small', { class: 'faint' }, plural(v.tables.length, 'table'))))) : null,
+        h('div', { class: 'dg-start-foot' },
+          h('button', {
+            class: 'btn ghost',
+            title: 'Show every table in the diagram',
+            onclick: () => {
+              closeStart();
+              current = null;
+              drawViewsButton();
+              diagram.showAll();
+            },
+          }, `Show all ${plural(model.nodes.length, 'table')}`)));
+      if (start) start.replaceWith(panel);
+      else host.append(panel);
+      start = panel;
+      requestAnimationFrame(() => find.focus());
+    }
+
     try {
-      const tables = await loadDiagram();
+      const answer = await loadDiagram();
       if (S.tab !== 'diagram' || S.db !== db || !host.isConnected) return;
+      tables = answer.tables;
+      views = answer.views || [];
       if (!tables.length) {
         put(host, h('div', { class: 'empty' }, 'This database has no tables.'));
         return;
       }
+      // Until this browser has a diagram of its own here, a large database starts empty.
+      const saved = { ...last };
+      if (!('tables' in saved)) saved.tables = tables.length > DIAGRAM_WHOLE ? [] : null;
+      if (current && !views.some(v => v.name === current)) current = null;
+      drawViewsButton();
       if (diagram) diagram.destroy();
       diagram = DbvDiagram.mount(host, tables, {
         rows: Object.fromEntries((S.tables || []).map(t => [tableKey(t), t.rows])),
@@ -3894,11 +4154,16 @@
           }
         },
         onChange: state => {
-          store.set(saveKey, state);
-          reset.hidden = !diagram.moved();
+          remember(state);
+          if (!diagram) return;
+          if (!state.tables || state.tables.length) closeStart();
+          else if (!start) drawStart();
         },
+        onPick: pickTables,
+        onNote: text => toast(text),
       });
-      reset.hidden = !diagram.moved();
+      // A table asked for by the address opens the diagram, unless it is gone.
+      if (!diagram.count().shown && !(S.focus && tables.some(t => tableKey(t) === S.focus))) drawStart();
     } catch (e) {
       put(host, h('div', { class: 'pad' }, errorBox(e.message)));
     }
@@ -4414,7 +4679,7 @@
       try {
         const r = await api('sql', { db: S.db, sql, explain, write: writes.checked && !explain });
         renderSqlResult(result, r);
-        if (r.committed) loadTables();
+        if (r.committed || r.ended) loadTables();
       } catch (e) {
         put(result, errorBox(e.message));
       } finally {
@@ -4447,7 +4712,12 @@
         ? h('span', null, plural(count, 'row'), r.more ? h('span', { class: 'muted' }, ` (only the first ${fmtN(count)} are shown)`) : null)
         : h('span', null, `Done. Rows affected: ${fmtN(r.affected)}`),
       h('span', { class: 'faint' }, `${r.ms} ms`),
-      r.committed ? h('span', { class: 'tag danger' }, 'changes kept') : h('span', { class: 'tag' }, 'read only'),
+      r.ended
+        ? h('span', {
+          class: 'tag warn',
+          title: 'The script ran its own COMMIT or ROLLBACK, or a statement that commits by itself, such as CREATE TABLE on MySQL. The script decided what was kept.',
+        }, 'the script ended the transaction')
+        : r.committed ? h('span', { class: 'tag danger' }, 'changes kept') : h('span', { class: 'tag' }, 'read only'),
       r.columns.length && !r.plan ? h('span', { class: 'faint hint' }, 'Right-click a cell to copy.') : null);
 
     if (!r.columns.length) {

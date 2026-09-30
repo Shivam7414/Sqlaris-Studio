@@ -1704,32 +1704,42 @@ select.cell-input { min-width: 160px; }
 
 .diagram-view { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .diagram-view .search input { width: 240px; }
+/* The layout and detail switches are redrawn together, and sit in the toolbar as if loose. */
+.toolbar-group { display: contents; }
+
+/* With no table shown yet: where to start from. */
+.dg-start {
+  position: absolute;
+  z-index: 4;
+  left: 20px;
+  top: 20px;
+  bottom: 20px;
+  width: min(440px, calc(100% - 40px));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px;
+  border-radius: var(--r-lg);
+  background: var(--glass-strong);
+  backdrop-filter: blur(18px);
+  box-shadow: inset 0 0 0 1px var(--line-strong), var(--shadow);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.dg-start h3 { margin: 0; font-size: 15px; font-weight: 650; }
+.dg-start p { margin: 0; font-size: 13px; line-height: 1.5; }
+.dg-start .search input { width: 100%; }
+.dg-start .menu { padding: 0; }
+.dg-start .menu-item small { margin-left: 12px; white-space: nowrap; }
+.dg-start-foot { margin-top: auto; padding-top: 8px; border-top: 1px solid var(--line); }
 .diagram-host { position: relative; flex: 1; min-height: 440px; }
 .dg-stage { position: absolute; inset: 0; overflow: hidden; isolation: isolate; cursor: grab; user-select: none; touch-action: none; }
 .dg-stage.panning { cursor: grabbing; }
 .dg-dots { position: absolute; inset: 0; z-index: -1; pointer-events: none; background-image: radial-gradient(circle, var(--dot) 1px, transparent 1.4px); }
 .dg-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
-.dg-edges { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
-
-/* A line keeps about the same width on screen at any zoom: --inv is one over the zoom. */
-.dg-edge path { fill: none; }
-.dg-edge .hit { stroke: transparent; stroke-width: calc(12px * min(var(--inv, 1), 3)); pointer-events: stroke; cursor: help; }
-.dg-edge .base {
-  stroke: var(--edge);
-  stroke-width: calc(1.5px * min(var(--inv, 1), 2.6));
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-dasharray: 1;
-  stroke-dashoffset: 1;
-  transition: stroke var(--normal), stroke-width var(--normal), opacity var(--slow), stroke-dashoffset .9s var(--ease-out);
-}
-.dg-edge.drawn .base { stroke-dashoffset: 0; }
-.dg-edge .flow { stroke: #fff; stroke-width: calc(2.2px * min(var(--inv, 1), 2.6)); stroke-linecap: round; stroke-dasharray: .1 11; opacity: 0; transition: opacity var(--slow); }
-.dg-edge:hover .base, .dg-edge.near .base, .dg-edge.hot .base { stroke: var(--accent); stroke-width: calc(2px * min(var(--inv, 1), 2.6)); }
-/* Dots run along a focused table's keys, in the direction they point. */
-.dg-edge.hot .flow { opacity: .95; animation: dg-flow .7s linear infinite; }
-@keyframes dg-flow { to { stroke-dashoffset: -11.1; } }
-.focusing .dg-edge:not(.hot), .searching .dg-edge { opacity: .07; }
+/* The lines are drawn by diagram.js on this canvas, in the screen's own pixels. */
+.dg-edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.dg-stage.on-line { cursor: help; }
 
 .dg-group { position: absolute; left: 0; top: 0; border-radius: 18px; border: 1px dashed var(--line-strong); background: var(--accent-faint); transition: opacity .4s; }
 .dg-group.gone { opacity: 0; }
@@ -1782,7 +1792,8 @@ select.cell-input { min-width: 160px; }
 .focusing .dg-node:not(.lit):not(.focus), .searching .dg-node:not(.match) { opacity: .14; filter: saturate(.2); }
 .dg-node.dragging { z-index: 5; transition: none; box-shadow: 0 30px 60px -20px var(--lift), 0 0 0 1px var(--accent-line); }
 
-/* Zoomed far out, a box becomes a tile with its name large enough to read. */
+/* Zoomed far out, a box becomes a tile with its name large enough to read.
+   --fit, set by diagram.js for each box, keeps the name inside its box. */
 .dg-far {
   position: absolute;
   left: 50%;
@@ -1792,7 +1803,7 @@ select.cell-input { min-width: 160px; }
   overflow-wrap: anywhere;
   text-align: center;
   font-weight: 650;
-  font-size: calc(12px * min(var(--inv, 1), 3.4));
+  font-size: calc(12px * min(var(--inv, 1), 3.4, var(--fit, 3.4)));
   line-height: 1.05;
   letter-spacing: -.01em;
   color: var(--ink);
@@ -1807,7 +1818,7 @@ select.cell-input { min-width: 160px; }
 .far .dg-node { background: color-mix(in oklab, var(--hue) 14%, var(--surface)); }
 .far .dg-node.empty .dg-far { color: var(--ink-2); }
 /* Further out, only the tables with three keys or more keep a name, and it may spread past its box. */
-.farther .dg-far { width: 320px; overflow-wrap: normal; }
+.farther .dg-far { width: 320px; overflow-wrap: normal; font-size: calc(12px * min(var(--inv, 1), 3.4)); }
 .farther .dg-node:not(.hub):not(.focus):not(.lit):not(.match) .dg-far { opacity: 0; }
 
 .dg-hud { position: absolute; z-index: 3; display: flex; align-items: center; gap: 6px; pointer-events: none; }
@@ -1829,6 +1840,51 @@ select.cell-input { min-width: 160px; }
   font-variant-numeric: tabular-nums;
 }
 .dg-zoom { min-width: 54px; justify-content: center; color: var(--ink-2); }
+
+/* The tables hidden behind a box: on its top edge, left for the ones pointing to it, right for the ones it points to. */
+.dg-more {
+  position: absolute;
+  top: -10px;
+  height: 20px;
+  min-width: 30px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: var(--r-sm);
+  font: 600 11px var(--sans);
+  font-variant-numeric: tabular-nums;
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+  cursor: pointer;
+  transition: background var(--fast), color var(--fast);
+}
+.dg-more.in { left: 10px; }
+.dg-more.out { right: 10px; }
+.dg-more:hover { background: var(--accent); color: var(--on-accent); }
+.dg-more[hidden] { display: none; }
+.far .dg-more { opacity: 0; pointer-events: none; }
+.focusing .dg-node:not(.focus) .dg-more, .searching .dg-node:not(.match) .dg-more { opacity: 0; pointer-events: none; }
+
+/* What can be done with the table in focus. */
+.dg-hud-bl { left: 14px; bottom: 14px; right: 250px; flex-wrap: wrap; }
+.dg-bar:not(.on) { display: none; }
+.dg-bar > b {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  font: 600 12.5px var(--mono);
+  color: var(--accent-ink);
+  background: var(--glass-strong);
+  backdrop-filter: blur(12px);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dg-bar .btn { background: var(--glass-strong); backdrop-filter: blur(12px); }
 .dg-btn {
   display: grid;
   place-items: center;
