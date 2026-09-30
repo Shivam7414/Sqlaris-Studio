@@ -1,0 +1,12 @@
+{
+  "name": "sqlaris-studio",
+  "private": true,
+  "description": "Only for the browser tests. The app itself needs nothing from npm.",
+  "license": "MIT",
+  "scripts": {
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0"
+  }
+}

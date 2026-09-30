@@ -74,6 +74,50 @@ jobs:
         if: matrix.coverage
         run: php tests/php/coverage-report.php "$RUNNER_TEMP/coverage"
 
+  browser:
+    name: Browser tests
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -ptest"
+          --health-interval 2s --health-retries 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_mysql
+          coverage: none
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Playwright
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Browser tests
+        run: npx playwright test
+        env:
+          TEST_MYSQL_HOST: 127.0.0.1
+          TEST_MYSQL_PASSWORD: test
+
+      - name: Traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: test-results/
+
   docker:
     name: Docker image
     runs-on: ubuntu-latest

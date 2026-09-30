@@ -11,6 +11,7 @@ before changing behaviour it describes.
 php -S 127.0.0.1:8765 router.php     # run it, then open http://127.0.0.1:8765/
 node --test                          # diagram layout tests (tests/*.test.js)
 php tests/php/run.php                # unit tests, plus API tests against real databases
+npx playwright test                  # browser tests (dev-only, needs npm install and a TEST_* server)
 php -l <file.php>                    # syntax check one PHP file
 node --check <file.js>               # syntax check one JS file
 ```
@@ -80,9 +81,10 @@ not a pass for a change to `src/` or `api.php`: say plainly that the API tests d
   for the diagram layouts.
 - **Integration:** `tests/php/api.test.php` calls `api.php` over HTTP, signed in, against
   real PostgreSQL and MySQL/MariaDB servers, and reads the effect back through PDO.
-- **In the browser:** nothing automated yet. Until there is, the `verify` skill's browser
-  step is the check for flows on the page. Browser tests will be a separate suite with its
-  own command, so `node --test` must not pick them up.
+- **In the browser:** `tests/e2e/*.spec.js` with Playwright (`npx playwright test`,
+  after `npm install` and `npx playwright install chromium`). They need a `TEST_*` server,
+  make a `sqlaris_e2e` database and fail on any console error. They are named `.spec.js`
+  so `node --test` does not pick them up. A new critical flow gets a spec here.
 - **Coverage:** CI measures PHP line coverage with PCOV on the PHP 8.4 job
   (`tests/php/coverage.php`, report by `tests/php/coverage-report.php`). Locally it needs
   PCOV and `COVERAGE_DIR` set; without them nothing is measured. Every action in `api.php`

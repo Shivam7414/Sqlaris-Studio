@@ -409,6 +409,16 @@ fails and names it. GitHub Actions runs both suites on every push, with
 PHP 8.1 and PostgreSQL 12 and MySQL 8.0, and with PHP 8.4 and PostgreSQL 18 and
 MariaDB 11. It also builds the image and signs in to the demo.
 
+There are also browser tests, which sign in, open a table, change a value and delete a
+row in a real Chromium. They use Playwright, which only these tests need, and the same
+`TEST_*` server, where they make a database called `sqlaris_e2e`:
+
+```
+npm install
+npx playwright install chromium
+npx playwright test
+```
+
 ## Contributing
 
 Issues and pull requests are welcome. A few things that keep the project the way it is:

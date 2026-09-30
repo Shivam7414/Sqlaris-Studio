@@ -7,3 +7,6 @@ diagram-views.json.*
 tests/.env
 .claude/settings.local.json
 CLAUDE.local.md
+node_modules/
+test-results/
+playwright-report/
