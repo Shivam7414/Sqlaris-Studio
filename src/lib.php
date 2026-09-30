@@ -35,7 +35,8 @@ function dbv_config(string $key): mixed
     static $config = null;
 
     if ($config === null) {
-        $file = __DIR__.'/../config.php';
+        // SQLARIS_CONFIG points somewhere else, for the tests and for a container.
+        $file = (string) (getenv('SQLARIS_CONFIG') ?: __DIR__.'/../config.php');
 
         if (! is_file($file)) {
             throw new DbvError('There is no config.php yet. Copy config.example.php to config.php and fill it in.');
@@ -87,17 +88,76 @@ function dbv_env_file(string $file): array
  */
 function dbv_guard(): void
 {
-    $ip = $_SERVER['REMOTE_ADDR'] ?? '';
-    $host = strtolower((string) ($_SERVER['HTTP_HOST'] ?? ''));
-    $host = str_starts_with($host, '[')
-        ? substr($host, 1, max(0, (int) strpos($host, ']') - 1))
-        : explode(':', $host)[0];
-
-    if (! in_array($ip, ['127.0.0.1', '::1'], true) || ! in_array($host, ['localhost', '127.0.0.1', '::1'], true)) {
+    if (! dbv_client_allowed($_SERVER['REMOTE_ADDR'] ?? '', (string) ($_SERVER['HTTP_HOST'] ?? ''), (string) getenv('SQLARIS_ALLOW_FROM'))) {
         http_response_code(403);
         header('Content-Type: text/plain; charset=utf-8');
         exit('Sqlaris Studio only opens on this computer, through localhost.');
     }
+}
+
+/**
+ * The address must be this computer, and the Host header must name it too.
+ * $allowFrom adds addresses, comma separated, each an IP or a CIDR range. A
+ * container needs it: the host's requests arrive from the container network's
+ * gateway, never from 127.0.0.1. The Host header is checked either way.
+ */
+function dbv_client_allowed(string $ip, string $host, string $allowFrom = ''): bool
+{
+    $host = strtolower($host);
+    $host = str_starts_with($host, '[')
+        ? substr($host, 1, max(0, (int) strpos($host, ']') - 1))
+        : explode(':', $host)[0];
+
+    if (! in_array($host, ['localhost', '127.0.0.1', '::1'], true)) {
+        return false;
+    }
+
+    if (in_array($ip, ['127.0.0.1', '::1'], true)) {
+        return true;
+    }
+
+    foreach (array_filter(array_map('trim', explode(',', $allowFrom))) as $range) {
+        if (dbv_ip_in_range($ip, $range)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/** Whether $ip is $range, an address or a CIDR range such as 172.17.0.0/16. IPv4 and IPv6. */
+function dbv_ip_in_range(string $ip, string $range): bool
+{
+    [$base, $bits] = array_pad(explode('/', $range, 2), 2, null);
+    $ip = @inet_pton($ip);
+    $base = @inet_pton((string) $base);
+
+    if ($ip === false || $base === false || strlen($ip) !== strlen($base)) {
+        return false;
+    }
+
+    $max = strlen($ip) * 8;
+    $bits = $bits === null ? $max : $bits;
+
+    if (! ctype_digit((string) $bits) || (int) $bits > $max) {
+        return false;
+    }
+
+    $bits = (int) $bits;
+    $whole = intdiv($bits, 8);
+    $rest = $bits % 8;
+
+    if (substr($ip, 0, $whole) !== substr($base, 0, $whole)) {
+        return false;
+    }
+
+    if ($rest === 0) {
+        return true;
+    }
+
+    $mask = (0xFF << (8 - $rest)) & 0xFF;
+
+    return (ord($ip[$whole]) & $mask) === (ord($base[$whole]) & $mask);
 }
 
 function dbv_start_session(): void
@@ -293,8 +353,8 @@ function dbv_database_groups(): array
     return array_values($groups);
 }
 
-/** Your own arrangement of the database list, made in the page. Git ignores it. */
-const DBV_LAYOUT_FILE = __DIR__.'/../layout.json';
+/** Your own arrangement of the database list, made in the page. Git ignores it. SQLARIS_LAYOUT moves it, for a container. */
+define('DBV_LAYOUT_FILE', (string) (getenv('SQLARIS_LAYOUT') ?: __DIR__.'/../layout.json'));
 
 function dbv_layout(): array
 {

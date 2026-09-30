@@ -2,3 +2,4 @@
 config.php
 layout.json
 layout.json.tmp
+tests/.env

@@ -1,0 +1,12 @@
+# Your own setup and passwords never go into an image.
+.env
+config.php
+layout.json
+layout.json.tmp
+
+.git
+.github
+docs
+tests
+docker/demo
+compose.yaml

@@ -1,0 +1,86 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: PHP ${{ matrix.php }}, PostgreSQL ${{ matrix.postgres }}, ${{ matrix.mysql }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest versions the README promises, and the newest.
+          - php: '8.1'
+            postgres: '12'
+            mysql: 'mysql:8.0'
+          - php: '8.4'
+            postgres: '18'
+            mysql: 'mariadb:11'
+
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_PASSWORD: test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-retries 30
+      mysql:
+        image: ${{ matrix.mysql }}
+        env:
+          MYSQL_ROOT_PASSWORD: test
+          MARIADB_ROOT_PASSWORD: test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -ptest || mariadb-admin ping -h 127.0.0.1 -ptest"
+          --health-interval 2s --health-retries 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: pdo_pgsql, pdo_mysql, curl
+          coverage: none
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Diagram tests
+        run: node --test
+
+      - name: PHP tests
+        run: php tests/php/run.php
+        env:
+          TEST_PGSQL_HOST: 127.0.0.1
+          TEST_PGSQL_PASSWORD: test
+          TEST_MYSQL_HOST: 127.0.0.1
+          TEST_MYSQL_PASSWORD: test
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: docker build -t sqlaris-studio .
+
+      - name: Start the demo and sign in
+        run: |
+          VIEWER_PASSWORD=ci-password docker compose up -d --build --wait
+          token=$(curl -s -c jar http://127.0.0.1:8765/ | grep -o 'name="token" value="[^"]*"' | cut -d'"' -f4)
+          curl -s -b jar -c jar -o /dev/null -w '%{http_code}\n' \
+            --data-urlencode "token=$token" --data-urlencode username=demo --data-urlencode password=ci-password \
+            http://127.0.0.1:8765/ | grep -q 303
+          curl -s -b jar -H 'X-Sqlaris: 1' -d '{"action":"tables","db":"pg/shop"}' http://127.0.0.1:8765/api.php | grep -q '"name":"orders"'
+
+      - name: Logs
+        if: failure()
+        run: docker compose logs

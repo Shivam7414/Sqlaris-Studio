@@ -1,5 +1,7 @@
 # Sqlaris Studio
 
+[![Tests](https://github.com/Shivam7414/Sqlaris-Studio/actions/workflows/tests.yml/badge.svg)](https://github.com/Shivam7414/Sqlaris-Studio/actions/workflows/tests.yml)
+
 A database browser for PostgreSQL and MySQL/MariaDB that runs on your own machine.
 Browse and edit tables, draw a whole database as a diagram, run SQL, and keep the databases
 in shape.
@@ -13,9 +15,23 @@ deployed to a server.
 ![The tables of a database, with row counts, sizes and actions](docs/screenshots/overview.png)
 
 The screenshots are of `shop`, a small sample store database with 12 tables and about
-19,000 rows.
+19,000 rows. The Docker quick start below comes with the same database, so you can try
+everything on it before pointing the viewer at your own.
 
 ## Quick start
+
+With Docker or Podman, and the demo database:
+
+```
+git clone https://github.com/Shivam7414/Sqlaris-Studio.git
+cd Sqlaris-Studio
+VIEWER_PASSWORD=pick-one docker compose up
+```
+
+Open `http://127.0.0.1:8765/` and sign in as `demo` with the password you picked. More in
+[Docker and Podman](#docker-and-podman).
+
+With PHP on your own machine:
 
 ```
 git clone https://github.com/Shivam7414/Sqlaris-Studio.git
@@ -26,6 +42,16 @@ php -S 127.0.0.1:8765 router.php
 ```
 
 Fill in `.env` first (see [Setup](#setup)), then open `http://127.0.0.1:8765/`.
+
+## When to use something else
+
+If you want a full database client with drivers for everything, an ER designer, data
+compare and a schema history, use DBeaver, DataGrip or Navicat. They are much bigger
+projects and they do more.
+
+Sqlaris Studio is for the other case: a light browser tab next to your app while you
+develop, that needs nothing but PHP, starts in a second, and makes it hard to change the
+wrong database by accident.
 
 ## What it does
 
@@ -107,7 +133,10 @@ a history of the last 50 queries. It runs read only unless you turn on "Allow ch
 ## Requirements
 
 - PHP 8.1 or later, with `pdo_pgsql`, `pdo_mysql`, or both.
-- PostgreSQL 12+, MySQL 5.7+ or MariaDB 10.2+.
+- PostgreSQL 12+, MySQL 8.0+ or MariaDB 10.4+. These are the versions the tests run on.
+  Older ones may work, but nothing checks that they do.
+
+Or only Docker or Podman, see below.
 
 ## Setup
 
@@ -127,6 +156,41 @@ a history of the last 50 queries. It runs read only unless you turn on "Allow ch
 
 The viewer refuses every sign-in until both the username and password are set. Changing
 either one signs everyone out.
+
+## Docker and Podman
+
+`compose.yaml` starts the viewer and a PostgreSQL server with the demo `shop` database:
+
+```
+VIEWER_PASSWORD=pick-one docker compose up
+```
+
+`podman compose up` works the same. Compose also reads `.env` in the project folder, so if
+you already have one, its `VIEWER_USERNAME` and `VIEWER_PASSWORD` are the sign-in instead
+of `demo`.
+
+To open your own databases, run the image on its own and pass the same settings `.env`
+takes, as environment variables:
+
+```
+docker build -t sqlaris-studio .
+docker run --rm -p 127.0.0.1:8765:8765 \
+    -e VIEWER_USERNAME=me -e VIEWER_PASSWORD=pick-one \
+    -e PGSQL_HOST=host.docker.internal -e PGSQL_PASSWORD=your-password \
+    sqlaris-studio
+```
+
+`host.docker.internal` is your own computer as seen from the container. On Podman it is
+`host.containers.internal`, and on Docker for Linux add
+`--add-host=host.docker.internal:host-gateway`. To group and colour databases, mount your
+own `config.php` over `/app/config.php`. The sidebar layout is kept in the `/data` volume.
+
+Always publish the port on `127.0.0.1` as above. Inside a container your requests arrive
+from the container network's gateway, not from 127.0.0.1, so the image lets that one
+address in as well. It finds the address when it starts and prints it; set
+`SQLARIS_ALLOW_FROM` (addresses or CIDR ranges, comma separated) to choose it yourself.
+Another container on the same network comes from its own address, so it is refused, and
+the Host header must still be `localhost` or `127.0.0.1`.
 
 ## Configuration
 
@@ -230,12 +294,27 @@ here.
 - Every request needs a signed-in session, and the API only accepts calls from its own
   page.
 - Table and column names in queries come from the database catalog, never straight from
-  the request, and every value is bound as a parameter. New names for a copy, a new
-  database or a column may only contain letters, digits and underscores.
+  the request. A name the catalog does not know is refused before any SQL is written.
+  Sort directions and filter operators come from a fixed list, and page sizes are
+  numbers.
+- Every value is bound as a parameter. On MySQL, which would read the text `1 or 1=1` as
+  the number 1, a value for a number column must be a number before it is sent.
+- New names for a copy, a new database or a column may only contain letters, digits and
+  underscores.
 - A column's type, and a default given as SQL, go into the statement as you write them,
-  the same as a query in the SQL tab. The form shows that statement before it runs.
+  the same as a query in the SQL tab, but they cannot end it with `;` or a comment. The
+  form shows that statement before it runs.
+- The SQL tab runs your SQL as it is; that is what it is for. Unless "Allow changes" is on,
+  the connection is read only and the transaction is rolled back afterwards. That keeps a
+  stray UPDATE from doing damage, but it is a safety catch for you, not a permission
+  system: anyone signed in can turn it on.
 - Dropping or emptying anything requires typing its name, and system databases such as
   `postgres` or `mysql` can never be dropped.
+
+Each point above has a test in `tests/php/` that sends the hostile version of the request
+to the real API and then checks the database directly. Two are not tested: the Apache
+rules in `.htaccess`, since the tests use PHP's built-in server, and the refusal to drop a
+system database, since a broken check would drop it for real.
 
 If you find a way around any of this, please report it privately through
 [GitHub's security advisories](https://github.com/Shivam7414/Sqlaris-Studio/security/advisories/new)
@@ -254,17 +333,52 @@ src/libraries.php    downloads the bundled libraries
 assets/app.js        the whole front end
 assets/diagram.js    the diagram layouts, also loaded by the tests
 assets/app.css
-tests/               tests for the diagram layouts
+tests/php/           tests for the API, against real databases
+tests/*.test.js      tests for the diagram layouts
+Dockerfile           the image, for Docker and Podman
+compose.yaml         the image with the demo database
+docker/              the image's start script and the demo data
 ```
 
 ## Tests
 
-The diagram layouts have tests that use Node's own runner, so there is nothing to install.
-From the project folder:
+There are two suites, and neither needs anything installed besides PHP and Node.
 
 ```
+php tests/php/run.php
 node --test
 ```
+
+The PHP suite starts the viewer on PHP's built-in server, signs in through the real form
+and calls `api.php` the way the page does. Every check reads the database straight through
+PDO afterwards, not through the viewer. It covers:
+
+- The localhost and Host checks, sign-in, the form token, and what the router refuses to
+  serve.
+- Every screen's data: tables, structure, relations, lookups, health, activity, the
+  diagram, exports in all three formats and maintenance.
+- Edits, inserts, deletes, pastes and imports, including that a failed paste or import
+  keeps nothing.
+- Hostile input: SQL in table names, column names, sort directions, filter operators, row
+  keys, page sizes, column types and values, and names that contain the quote character.
+- That the SQL tab changes nothing unless "Allow changes" is on, even with a `commit;` in
+  the script.
+
+The unit tests always run. The API tests run against each server you give it in
+`TEST_PGSQL_*` and `TEST_MYSQL_*`, the same names as in `.env` with `TEST_` in front, set
+in the environment or in `tests/.env`:
+
+```
+TEST_PGSQL_HOST=127.0.0.1
+TEST_PGSQL_PASSWORD=secret
+TEST_MYSQL_HOST=127.0.0.1
+TEST_MYSQL_PASSWORD=secret
+```
+
+Each run makes a database called `sqlaris_test`, fills it, and drops it at the end, so use
+a server where that name is free. GitHub Actions runs both suites on every push, with
+PHP 8.1 and PostgreSQL 12 and MySQL 8.0, and with PHP 8.4 and PostgreSQL 18 and
+MariaDB 11. It also builds the image and signs in to the demo.
 
 ## Contributing
 
@@ -273,8 +387,8 @@ Issues and pull requests are welcome. A few things that keep the project the way
 - No build step and no package manager. The page loads `assets/app.js` as it is.
 - New libraries go in `assets/vendor` through `src/libraries.php`, with their license file.
 - Anything that changes data should work on both PostgreSQL and MySQL, or say clearly
-  where it does not.
-- If you change `assets/diagram.js`, run `node --test` before sending it.
+  where it does not, and come with a test in `tests/php/api.test.php`.
+- Run both test suites before sending a change.
 
 ## Bundled libraries
 

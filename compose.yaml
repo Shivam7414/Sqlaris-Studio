@@ -1,0 +1,45 @@
+# Sqlaris Studio with a demo PostgreSQL database, the "shop" from the README's
+# screenshots. Pick a password for the viewer and start both:
+#
+#     VIEWER_PASSWORD=pick-one docker compose up
+#
+# then open http://127.0.0.1:8765/ and sign in as "demo". Podman works the
+# same with podman compose. Compose also reads .env in this folder, so if you
+# have one, its VIEWER_USERNAME and VIEWER_PASSWORD are the sign-in instead.
+
+services:
+  studio:
+    build: .
+    ports:
+      # 127.0.0.1 only, so nothing else on your network can reach it.
+      - "127.0.0.1:8765:8765"
+    environment:
+      VIEWER_USERNAME: ${VIEWER_USERNAME:-demo}
+      VIEWER_PASSWORD: ${VIEWER_PASSWORD:?Set VIEWER_PASSWORD to the password you want for signing in}
+      PGSQL_HOST: shop-db
+      PGSQL_PORT: 5432
+      PGSQL_USERNAME: postgres
+      PGSQL_PASSWORD: demo
+      PGSQL_DATABASE: shop
+    volumes:
+      - studio-data:/data
+    depends_on:
+      shop-db:
+        condition: service_healthy
+
+  shop-db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_PASSWORD: demo
+      POSTGRES_DB: shop
+    volumes:
+      # Loaded the first time the database starts.
+      - ./docker/demo/shop.sql.gz:/docker-entrypoint-initdb.d/shop.sql.gz:ro
+    healthcheck:
+      # Over TCP, which only opens once the demo data is loaded.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "shop"]
+      interval: 2s
+      retries: 30
+
+volumes:
+  studio-data:

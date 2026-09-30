@@ -3,8 +3,9 @@
 // A sample setup. Copy it to config.php and change what you need.
 //
 // Passwords come from .env in this folder, which git ignores, so this file
-// can be kept in git. Copy .env.example to .env and fill it in.
-$env = dbv_env_file(__DIR__.'/.env');
+// can be kept in git. Copy .env.example to .env and fill it in. Without a
+// .env, as in a container, the same names are read from the environment.
+$env = dbv_env_file(__DIR__.'/.env') + getenv();
 $servers = [];
 
 // The database servers, by a short key that shows up in the page's links.
