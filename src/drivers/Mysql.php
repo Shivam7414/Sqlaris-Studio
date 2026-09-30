@@ -161,7 +161,7 @@ final class DbvMysql extends DbvDriver
 
         foreach (dbv_all($this->pdo,
             'select column_name as name, column_type as type, data_type as native, is_nullable as nullable,
-                column_default as def, extra, column_comment as comment, collation_name as collation
+                column_default as def, extra as extra, column_comment as comment, collation_name as collation
             from information_schema.columns where table_schema = ? and table_name = ? order by ordinal_position',
             [$schema, $name]) as $column) {
             $native = strtolower($column['native']);
@@ -291,7 +291,7 @@ final class DbvMysql extends DbvDriver
         $indexes = [];
 
         foreach (dbv_all($this->pdo,
-            "select index_name as name, non_unique, column_name as col, sub_part, index_type as type
+            "select index_name as name, non_unique as non_unique, column_name as col, sub_part as sub_part, index_type as type
             from information_schema.statistics where table_schema = ? and table_name = ?
             order by index_name = 'PRIMARY' desc, index_name, seq_in_index", $params) as $row) {
             $indexes[$row['name']] ??= ['name' => $row['name'], 'unique' => ! $row['non_unique'], 'type' => $row['type'], 'cols' => []];
@@ -311,7 +311,7 @@ final class DbvMysql extends DbvDriver
         $rules = [];
 
         foreach (dbv_all($this->pdo,
-            'select constraint_name as name, update_rule, delete_rule from information_schema.referential_constraints
+            'select constraint_name as name, update_rule as update_rule, delete_rule as delete_rule from information_schema.referential_constraints
             where constraint_schema = ? and table_name = ?', $params) as $row) {
             $rules[$row['name']] = $row;
         }
@@ -479,6 +479,20 @@ final class DbvMysql extends DbvDriver
                 'false', 'f', 'no' => '0',
                 default => $value,
             };
+        }
+
+        // MySQL reads the text '1 or 1=1' as the number 1, with only a warning
+        // outside INSERT and UPDATE, so a bad key would delete row 1. A number
+        // column only takes a number here, as PostgreSQL's cast already makes sure.
+        if ($column['category'] === 'number') {
+            $whole = in_array($column['native'], ['tinyint', 'smallint', 'mediumint', 'int', 'integer', 'bigint', 'year'], true);
+            $number = trim($value);
+
+            if (! preg_match($whole ? '/^[+-]?\d+$/' : '/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/', $number)) {
+                throw new DbvError("{$column['name']} takes ".($whole ? 'a whole number' : 'a number').", and \"{$value}\" is not one.");
+            }
+
+            return $number;
         }
 
         return $value;
@@ -660,7 +674,7 @@ final class DbvMysql extends DbvDriver
     private function upkeep(array $t): array
     {
         $u = dbv_one($this->pdo,
-            'select engine, row_format, table_rows as estimate, data_free as free, table_collation as collation,
+            'select engine as engine, row_format as row_format, table_rows as estimate, data_free as free, table_collation as collation,
                 unix_timestamp(create_time) * 1000 as created, unix_timestamp(update_time) * 1000 as updated
             from information_schema.tables where table_schema = ? and table_name = ?', [$t['schema'], $t['name']]);
 
@@ -696,7 +710,7 @@ final class DbvMysql extends DbvDriver
     public function health(): array
     {
         $tables = array_map(fn (array $t) => self::ints($t, ['data', 'indexes', 'live', 'free', 'updated']), dbv_all($this->pdo,
-            "select t.table_schema as `schema`, t.table_name as name, t.engine, t.table_rows as live,
+            "select t.table_schema as `schema`, t.table_name as name, t.engine as engine, t.table_rows as live,
                 coalesce(t.data_length, 0) as data, coalesce(t.index_length, 0) as indexes, t.data_free as free,
                 unix_timestamp(t.update_time) * 1000 as updated,
                 exists (select 1 from information_schema.table_constraints c
@@ -765,7 +779,7 @@ final class DbvMysql extends DbvDriver
                 'rollbacks' => $s['com_rollback'] ?? 0,
             ],
             'sessions' => array_map(fn ($row) => self::ints($row, ['id', 'ms']), dbv_all($this->pdo,
-                "select id, user, null as app, host as client,
+                "select id as id, `user` as `user`, null as app, host as client,
                     case command when 'Sleep' then 'idle' when 'Query' then 'active' else lower(command) end as state,
                     time * 1000 as ms, state as wait, left(info, 2000) as query
                 from information_schema.processlist

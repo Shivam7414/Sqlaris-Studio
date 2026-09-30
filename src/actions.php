@@ -617,6 +617,8 @@ function dbv_action_import(DbvDriver $d, array $t, array $req): array
                 $statement->execute(array_map(fn ($v, $c) => $v === null ? null : $d->value($c, (string) $v), $row, $columns));
             } catch (PDOException $e) {
                 throw new DbvError('Row '.($i + 1).': '.DbvDriver::message($e));
+            } catch (DbvError $e) {
+                throw new DbvError('Row '.($i + 1).': '.$e->getMessage());
             }
 
             // MySQL counts an updated row twice, so only "touched or not" is counted.
