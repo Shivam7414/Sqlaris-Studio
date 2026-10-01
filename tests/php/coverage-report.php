@@ -19,7 +19,8 @@ foreach (glob($dir.'/*.json') ?: [] as $file) {
         $rel = str_replace([$root, '\\'], ['', '/'], str_replace('\\', '/', $path));
 
         // Only the app: not the tests, the Claude hooks or the downloaded libraries.
-        if (preg_match('~^(tests|\.claude|assets/vendor)/~', $rel) || ! str_ends_with($rel, '.php')) {
+        // A file with no lines that can run (only declarations) has nothing to measure.
+        if (preg_match('~^(tests|\.claude|assets/vendor)/~', $rel) || ! str_ends_with($rel, '.php') || ! $hits) {
             continue;
         }
 

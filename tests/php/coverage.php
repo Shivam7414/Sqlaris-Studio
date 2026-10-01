@@ -9,7 +9,11 @@ declare(strict_types=1);
 // them up. Without PCOV this does nothing, so the tests never need it.
 
 if (extension_loaded('pcov') && ($dir = getenv('COVERAGE_DIR'))) {
+    // PCOV instruments every file once it is enabled, but records nothing until asked to.
+    \pcov\start();
+
     register_shutdown_function(function () use ($dir) {
+        \pcov\stop();
         file_put_contents($dir.'/'.getmypid().'-'.hrtime(true).'.json', json_encode(\pcov\collect()));
         // The built-in server is one process for every request, so each one starts from nothing.
         \pcov\clear();
