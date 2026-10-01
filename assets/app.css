@@ -4,8 +4,8 @@
  * flows across the page instead of snapping. --hue is the colour everything
  * is painted in. With the Database page colours it is --db, so the whole page
  * says which database you are in. With any other set it is that set's own
- * colour, and the database keeps its marks: its button in the sidebar, its
- * label, the toast on a switch and the line along the top (the --db-* tokens).
+ * colour, and the database keeps its marks: its tab, its label and the toast
+ * on a switch (the --db-* tokens).
  */
 
 /* Inter and JetBrains Mono, from src/libraries.php. Until they are there, the
@@ -68,6 +68,8 @@
   --line-soft: rgb(255 255 255 / .05);
   --line-strong: rgb(255 255 255 / .14);
   --shine: rgb(255 255 255 / .055);
+  /* The light that crosses a database tab on a switch. */
+  --sweep: rgb(255 255 255 / .18);
   --dot: rgb(255 255 255 / .07);
   --edge: rgb(255 255 255 / .18);
   --ink: #eceef5;
@@ -135,6 +137,7 @@
   --line-soft: rgb(22 25 39 / .06);
   --line-strong: rgb(22 25 39 / .16);
   --shine: rgb(255 255 255 / .8);
+  --sweep: rgb(255 255 255 / .55);
   --dot: rgb(22 25 39 / .1);
   --edge: rgb(22 25 39 / .22);
   --ink: #12151f;
@@ -184,6 +187,7 @@
     --line-soft: rgb(22 25 39 / .06);
     --line-strong: rgb(22 25 39 / .16);
     --shine: rgb(255 255 255 / .8);
+    --sweep: rgb(255 255 255 / .55);
     --dot: rgb(22 25 39 / .1);
     --edge: rgb(22 25 39 / .22);
     --ink: #12151f;
@@ -225,9 +229,8 @@
   --accent-line: color-mix(in oklab, var(--accent) 42%, transparent);
   --accent-hover: color-mix(in oklab, var(--accent) 86%, black);
   --accent-glow: color-mix(in oklab, var(--hue) 60%, transparent);
-  /* The database's own marks: its button, its label, the line along the top. */
+  /* The database's own marks: its tab and its label. */
   --db-soft: color-mix(in oklab, var(--db-mark) 15%, transparent);
-  --db-line: color-mix(in oklab, var(--db-mark) 42%, transparent);
   --db-glow: color-mix(in oklab, var(--db) 60%, transparent);
   --focus: color-mix(in oklab, var(--accent) 28%, transparent);
   /* Grid rows are opaque, so the sticky row number never shows a cell sliding under it. */
@@ -453,43 +456,6 @@ body.busy .progress { opacity: 1; }
 .brand .i { width: 19px; height: 19px; color: var(--accent); filter: drop-shadow(0 0 6px var(--accent-glow)); }
 .brand .server { margin-left: auto; font: 400 11px var(--mono); color: var(--faint); letter-spacing: 0; }
 
-/* The current database, glowing in its colour. A light sweeps across it on a switch. */
-.db-button {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  margin: 0 12px 12px;
-  padding: 11px 12px 11px 14px;
-  border: 1px solid var(--db-line);
-  border-radius: var(--r-lg);
-  background: linear-gradient(135deg, var(--db-soft), transparent 75%), var(--field);
-  box-shadow: 0 10px 30px -16px var(--db-glow), inset 0 1px 0 var(--shine);
-  cursor: pointer;
-  text-align: left;
-  overflow: hidden;
-  transition: border-color var(--normal), box-shadow var(--normal), transform var(--fast);
-}
-.db-button::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(105deg, transparent 30%, rgb(255 255 255 / .22) 50%, transparent 70%);
-  transform: translateX(-120%);
-  pointer-events: none;
-}
-.db-button.sweep::after { animation: sweep .9s var(--ease-out); }
-@keyframes sweep { to { transform: translateX(120%); } }
-.db-button:hover { border-color: var(--db-mark); box-shadow: 0 12px 34px -14px var(--db-glow), inset 0 1px 0 var(--shine); }
-.db-button:active { transform: scale(.985); }
-.db-button > .i:first-child { color: var(--db-mark); width: 18px; height: 18px; }
-.db-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
-.db-text b { font: 650 15px var(--display); letter-spacing: -.01em; }
-.db-text b, .db-text small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.db-text small { color: var(--db-ink); font-size: 12px; font-weight: 550; }
-.db-button .chev { color: var(--muted); transition: transform var(--normal) var(--ease-out); }
-.db-button[aria-expanded="true"] .chev { transform: rotate(180deg); }
-
 .side-search { position: relative; margin: 0 12px 8px; display: flex; align-items: center; }
 .side-search .i { position: absolute; left: 11px; color: var(--faint); pointer-events: none; }
 .side-search input { width: 100%; padding-left: 34px; padding-right: 32px; border-color: transparent; }
@@ -535,6 +501,63 @@ body.busy .progress { opacity: 1; }
 .side-empty { padding: 12px 10px; color: var(--muted); }
 .side-foot { padding: 11px 18px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); }
 
+/* ----------------------------------------------------------- database tabs */
+
+/* The databases open side by side, as in a browser. The open tab is the same
+   glass as the bar under it, so the two read as one piece, and it carries the
+   database colour whatever colours the page is in. The others show their own
+   colour in their dot, from --c. */
+.db-strip { display: flex; align-items: flex-end; gap: 6px; height: 42px; padding: 0 12px 0 8px; flex-shrink: 0; }
+/* Says what the row is, in the same small caps as the toolbar labels. */
+.db-strip-label { align-self: center; display: flex; align-items: center; gap: 6px; flex-shrink: 0; padding: 0 8px 0 10px; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+.db-strip-label .i { width: 13px; height: 13px; }
+.db-tabs { display: flex; align-items: flex-end; gap: 2px; height: 100%; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.db-tabs::-webkit-scrollbar { display: none; }
+.db-tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  max-width: 240px;
+  height: 34px;
+  padding-right: 6px;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: var(--r) var(--r) 0 0;
+  color: var(--muted);
+  overflow: hidden;
+  transition: background var(--fast), color var(--fast);
+}
+.db-tab:hover { background: var(--hover); color: var(--ink); }
+.db-tab.active {
+  background: var(--glass);
+  border-color: var(--line);
+  color: var(--ink);
+  box-shadow: inset 0 2px 0 var(--db-mark), inset 0 18px 22px -20px var(--db-glow);
+}
+.db-tab-name { display: flex; align-items: center; gap: 9px; min-width: 0; height: 100%; padding: 0 6px 0 12px; border: 0; background: none; color: inherit; font-weight: 550; cursor: pointer; }
+.db-tab-name .grow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.db-tab-name:focus-visible { outline-offset: -3px; border-radius: var(--r); }
+.db-tab.active .db-tab-name { font-weight: 650; cursor: default; }
+.db-tab .dot { background: var(--c); }
+.db-tab.active .dot { background: var(--db-mark); box-shadow: 0 0 0 3px var(--db-soft), 0 0 10px var(--db-mark); }
+.db-tab-close { display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: var(--r-sm); background: none; color: var(--faint); cursor: pointer; opacity: 0; transition: opacity var(--fast), background var(--fast), color var(--fast); }
+.db-tab-close .i { width: 12px; height: 12px; }
+.db-tab:hover .db-tab-close, .db-tab.active .db-tab-close, .db-tab-close:focus-visible { opacity: 1; }
+.db-tab-close:hover { background: var(--hover); color: var(--ink); }
+.db-tab-add { align-self: center; flex-shrink: 0; }
+/* A light sweeps across the tab of the database just switched to. */
+.db-tab::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(105deg, transparent 30%, var(--sweep) 50%, transparent 70%);
+  transform: translateX(-120%);
+  pointer-events: none;
+}
+.db-tab.sweep::after { animation: sweep .9s var(--ease-out); }
+@keyframes sweep { to { transform: translateX(120%); } }
+
 /* ----------------------------------------------------------------- top bar */
 
 .top {
@@ -547,11 +570,8 @@ body.busy .progress { opacity: 1; }
   height: 56px;
   border-bottom: 1px solid var(--line);
   background: var(--glass);
-  box-shadow: inset 0 1px 0 var(--shine);
   flex-shrink: 0;
 }
-/* The line along the top in the database colour, whatever colours the page is in. */
-.top::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 2px; background: linear-gradient(90deg, var(--db-mark), color-mix(in oklab, var(--db-mark) 25%, transparent)); pointer-events: none; }
 .crumbs { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 14px; }
 .crumbs a { color: var(--muted); }
 .crumbs a:hover { color: var(--ink); }

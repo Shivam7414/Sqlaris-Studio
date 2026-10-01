@@ -147,8 +147,11 @@ want the whole script kept or undone together.
   optimize, analyze and check on MySQL. Copy, rename, empty or drop a table. Copy, create
   or drop a database. Each table in a database's list has Browse, Structure, SQL, Empty and
   Drop buttons, and a menu for the rest.
-- Group, reorder and hide databases in the sidebar. Each database can have its own
-  accent colour, so you can tell at a glance which one you are about to change.
+- Open several databases side by side in tabs along the top. Each tab keeps the table,
+  filters and page you left it on. A middle click closes a tab.
+- Group, reorder and hide databases in the list the + button opens. Each database can
+  have its own accent colour, so you can tell at a glance which one you are about to
+  change.
 - Dark, light and Follow Windows themes, page colour palettes, and keyboard shortcuts
   you can remap.
 
@@ -242,8 +245,8 @@ The page is dark by default. The switch in the top bar picks Dark, Light or Foll
 The palette button next to it picks the page colours, each in dark and light. Database, the
 default, paints the whole page in the colour of the database you are in, so you can see at a
 glance which one you are about to change. Midnight, Graphite, Ocean, Forest, Plum and Sand
-paint it in their own colour instead, and the database button, its label and a line along
-the top keep the database colour. When the system asks for reduced motion, nothing animates.
+paint it in their own colour instead, and each database tab keeps its own colour. When the
+system asks for reduced motion, nothing animates.
 
 ## Keyboard shortcuts
 

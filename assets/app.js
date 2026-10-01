@@ -579,6 +579,9 @@
     drawer: null,
     // The table in focus on the Diagram tab, as "schema.name".
     focus: null,
+    // The databases open side by side, each with the address of the place it
+    // was left at, so a switch back lands on the same table, filters and page.
+    tabs: store.get('tabs', []).filter(t => t && typeof t.db === 'string'),
   };
   const UI = {};
 
@@ -651,6 +654,9 @@
   function syncHash(replace) {
     const hash = stateToHash(S);
     if (hash !== location.hash) history[replace ? 'replaceState' : 'pushState'](null, '', hash);
+    const tab = S.tabs.find(t => t.db === S.db);
+    if (tab) tab.hash = hash;
+    saveTabs();
   }
 
   // Moves to another place: a database, a table, a tab. Goes through the
@@ -662,7 +668,8 @@
   }
 
   const openTable = (table, extra = {}) => go({ table, tab: 'data', ...fresh, ...extra });
-  const openDb = id => go({ db: id, table: null, tab: 'overview', ...fresh });
+  // A database that has a tab already goes back to where it was left.
+  const openDb = id => (S.tabs.some(t => t.db === id) ? switchTab(id) : go({ db: id, table: null, tab: 'overview', ...fresh }));
 
   // A change inside the data view (search, filter, sort, page) reloads the rows
   // without rebuilding the toolbar, so the box being typed in keeps its focus.
@@ -684,8 +691,16 @@
     const seq = ++routeSeq;
     const st = hashToState();
     const ids = allDbs().map(d => d.id);
+    // The tab of a database that was dropped, or that config.php no longer lists, closes.
+    S.tabs = S.tabs.filter(t => ids.includes(t.db));
     const last = store.get('lastDb', null);
-    const db = ids.includes(st.db) ? st.db : ids.includes(last) ? last : ids[0];
+    const db = ids.includes(st.db) ? st.db : ids.includes(last) ? last : S.tabs.length ? S.tabs[0].db : ids[0];
+
+    // A database reached without its tab, from the list, a link or Back, gets one beside the open tab.
+    if (!S.tabs.some(t => t.db === db)) {
+      const at = S.tabs.findIndex(t => t.db === S.db);
+      S.tabs.splice(at < 0 ? S.tabs.length : at + 1, 0, { db, hash: '' });
+    }
 
     if (db !== S.db) {
       const switching = S.db != null;
@@ -771,7 +786,8 @@
     // The glow behind the page, in the colour of the database on screen.
     document.body.prepend(h('div', { class: 'aurora', 'aria-hidden': 'true' }));
     UI.server = h('span', { class: 'server' });
-    UI.dbButton = h('button', { class: 'db-button', title: 'Pick a database', onclick: e => openDbMenu(e.currentTarget) });
+    UI.dbTabs = h('div', { class: 'db-tabs' });
+    UI.addTab = h('button', { class: 'btn ghost icon-only db-tab-add', title: 'Open a database', onclick: e => openDbMenu(e.currentTarget) }, icon('plus'));
     UI.sideFilter = h('input', {
       class: 'input',
       type: 'search',
@@ -798,11 +814,13 @@
       h('div', { class: 'progress' }),
       h('aside', { class: 'side' },
         h('div', { class: 'brand' }, icon('database'), h('span', null, 'Sqlaris Studio'), UI.server),
-        UI.dbButton,
         h('label', { class: 'side-search' }, icon('search'), UI.sideFilter, kbdFor('filterTables')),
         UI.tableList,
         UI.sideFoot),
       h('main', { class: 'main' },
+        h('nav', { class: 'db-strip', 'aria-label': 'Open databases' },
+          h('span', { class: 'db-strip-label' }, icon('database'), 'Databases'),
+          UI.dbTabs, UI.addTab),
         h('header', { class: 'top' },
           UI.crumbs,
           UI.tabs,
@@ -831,14 +849,13 @@
     root.style.setProperty('--db', color);
   }
 
-  // Switching database: a light sweeps the database button and a toast names
-  // the database now open, while the colour flows to its own.
+  // Switching database: a light sweeps its tab and a toast names the database
+  // now open, while the colour flows to its own.
   function announceDb() {
     const db = dbById(S.db);
     if (!db) return;
-    UI.dbButton.classList.remove('sweep');
-    void UI.dbButton.offsetWidth;
-    UI.dbButton.classList.add('sweep');
+    const tab = UI.dbTabs.querySelector('.db-tab.active');
+    if (tab) tab.classList.add('sweep');
     toast(`Now on ${db.name}`, 'db');
   }
 
@@ -846,13 +863,7 @@
     const db = dbById(S.db);
     setDbColor(dbColor(db));
     UI.server.textContent = db ? db.where : '';
-    put(UI.dbButton,
-      icon('database'),
-      h('span', { class: 'db-text' },
-        h('b', null, db ? db.name : 'Pick a database'),
-        h('small', null, db ? dbKind(db) : '')),
-      icon('down', 'chev'));
-
+    renderDbTabs();
     renderTableList();
 
     const home = { db: S.db, table: null, tab: 'overview', ...fresh };
@@ -910,6 +921,68 @@
 
     const rows = S.tables.reduce((sum, t) => sum + (t.rows || 0), 0);
     UI.sideFoot.textContent = `${fmtN(S.tables.length)} tables, ${fmtN(rows)} rows` + (S.info ? `, ${fmtBytes(S.info.size)}` : '');
+  }
+
+  // ------------------------------------------------------------ database tabs
+
+  const saveTabs = () => store.set('tabs', S.tabs.map(({ db, hash }) => ({ db, hash })));
+
+  function switchTab(id) {
+    const tab = S.tabs.find(t => t.db === id);
+    const hash = (tab && tab.hash) || stateToHash({ db: id, table: null, tab: 'overview', ...fresh });
+    if (hash !== location.hash) history.pushState(null, '', hash);
+    return route();
+  }
+
+  // Closing the open tab moves to the one beside it, as a browser does. The last tab stays.
+  function closeTabs(ids) {
+    const keep = S.tabs.filter(t => !ids.includes(t.db));
+    if (!keep.length) return;
+    const at = S.tabs.findIndex(t => t.db === S.db);
+    S.tabs = keep;
+    saveTabs();
+    if (ids.includes(S.db)) switchTab(keep[Math.min(at, keep.length - 1)].db);
+    else renderDbTabs();
+  }
+
+  function tabMenu(e, d) {
+    const others = S.tabs.map(t => t.db).filter(id => id !== d.id);
+    openMenuAt(e, [
+      { title: d.name },
+      { label: 'Close tab', icon: 'x', disabled: !others.length, run: () => closeTabs([d.id]) },
+      { label: 'Close the other tabs', icon: 'x', disabled: !others.length, run: () => closeTabs(others) },
+      'sep',
+      { label: 'Copy name', icon: 'copy', run: () => copyText(d.name, 'Database name copied.') },
+    ]);
+  }
+
+  // Drawn again only when the tabs or the open one change, so a switch's sweep runs to the end.
+  function renderDbTabs() {
+    const key = S.tabs.map(t => t.db).join() + '|' + S.db;
+    if (key === UI.tabsKey) return;
+    UI.tabsKey = key;
+    put(UI.dbTabs, S.tabs.map(t => {
+      const d = dbById(t.db);
+      if (!d) return null;
+      const active = t.db === S.db;
+      return h('div', {
+        class: 'db-tab' + (active ? ' active' : ''),
+        style: `--c:${dbColor(d)}`,
+        // A middle click closes the tab, as in a browser, without starting to scroll.
+        onmousedown: e => { if (e.button === 1) e.preventDefault(); },
+        onauxclick: e => { if (e.button === 1) closeTabs([d.id]); },
+        oncontextmenu: e => tabMenu(e, d),
+      },
+      h('button', {
+        class: 'db-tab-name',
+        title: `${dbKind(d)} on ${d.where}`,
+        'aria-current': active ? 'page' : null,
+        onclick: () => { if (!active) switchTab(d.id); },
+      }, h('span', { class: 'dot' }), h('span', { class: 'grow' }, d.name)),
+      S.tabs.length > 1 ? h('button', { class: 'db-tab-close', title: `Close ${d.name}`, onclick: () => closeTabs([d.id]) }, icon('x')) : null);
+    }));
+    const active = UI.dbTabs.querySelector('.active');
+    if (active) active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
 
   function renderView() {
@@ -1168,8 +1241,8 @@
 
   // The page colours. Database, the default, paints the page in the colour of
   // the database on screen. Each other set paints it in its own colour, from
-  // one tint in app.css, and the database keeps its marks: its button, its
-  // label and the line along the top.
+  // one tint in app.css, and the database keeps its marks: its tab and its
+  // label.
   const TINTS = [['database', 'Database'], ['midnight', 'Midnight'], ['graphite', 'Graphite'], ['ocean', 'Ocean'], ['forest', 'Forest'], ['plum', 'Plum'], ['sand', 'Sand']];
 
   function applyTint() {
@@ -1198,7 +1271,7 @@
     }, h('span', { class: 'tint-swatch' }), label)));
     openPopover(anchor, h('div', { class: 'menu tint-menu' },
       h('div', { class: 'menu-title' }, 'Page colours'),
-      h('p', { class: 'muted small' }, 'Database paints the page in the colour of the database you are in. With any other, the database button and the line along the top keep that colour.'),
+      h('p', { class: 'muted small' }, 'Database paints the page in the colour of the database you are in. With any other, each database tab keeps its own colour.'),
       grid), { alignRight: true });
   }
 
@@ -1277,7 +1350,7 @@
 
   function reopenDbMenu() {
     closePopover();
-    openDbMenu(UI.dbButton);
+    openDbMenu(UI.addTab);
   }
 
   async function newGroup(d = null) {
@@ -1469,7 +1542,7 @@
     }, h('div', { class: 'db-menu-search' }, search), list, foot);
     dbMenu = { el: menu, draw };
     draw();
-    openPopover(anchor, menu, { width: anchor.offsetWidth });
+    openPopover(anchor, menu, { width: 300 });
   }
 
   function queryTable(t) {
