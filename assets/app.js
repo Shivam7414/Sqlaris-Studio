@@ -560,6 +560,9 @@
 
   // -------------------------------------------------------------------- state
 
+  // A database can be open in more than one tab, so each tab has an id of its own.
+  const newTabId = () => Math.random().toString(36).slice(2, 8);
+
   const S = {
     groups: [],
     layout: null,
@@ -581,7 +584,10 @@
     focus: null,
     // The databases open side by side, each with the address of the place it
     // was left at, so a switch back lands on the same table, filters and page.
-    tabs: store.get('tabs', []).filter(t => t && typeof t.db === 'string'),
+    tabs: store.get('tabs', [])
+      .filter(t => t && typeof t.db === 'string')
+      .map(t => ({ id: typeof t.id === 'string' ? t.id : newTabId(), db: t.db, hash: typeof t.hash === 'string' ? t.hash : '' })),
+    tabId: null,
   };
   const UI = {};
 
@@ -605,6 +611,8 @@
   const isView = t => t.kind.includes('view');
   const quoteIdent = s => (isMysql() ? '`' + s.replace(/`/g, '``') + '`' : '"' + s.replace(/"/g, '""') + '"');
   const qualified = t => (t.schema === homeSchema() ? quoteIdent(t.name) : quoteIdent(t.schema) + '.' + quoteIdent(t.name));
+  // The same for a database that may not be the one on screen.
+  const tableIn = (d, schema, name) => (schema === (d.driver === 'mysql' ? d.name : 'public') ? name : `${schema}.${name}`);
 
   function parseTableKey(key) {
     const i = key.indexOf('.');
@@ -623,6 +631,9 @@
     if (s.search) p.set('q', s.search);
     if (s.filters && s.filters.length) p.set('f', JSON.stringify(s.filters));
     if (s.tab === 'diagram' && s.focus) p.set('focus', s.focus);
+    if (s.tab === 'find' && s.findId) p.set('id', s.findId);
+    // Which tab, so a reload or Back lands in the right one when a database is open twice.
+    if (s.tabId) p.set('dbtab', s.tabId);
     return '#' + p.toString();
   }
 
@@ -648,13 +659,15 @@
       search: p.get('q') || '',
       filters: filters.filter(f => f && typeof f.col === 'string'),
       focus: p.get('focus'),
+      findId: p.get('id') || '',
+      tabId: p.get('dbtab'),
     };
   }
 
   function syncHash(replace) {
     const hash = stateToHash(S);
     if (hash !== location.hash) history[replace ? 'replaceState' : 'pushState'](null, '', hash);
-    const tab = S.tabs.find(t => t.db === S.db);
+    const tab = S.tabs.find(t => t.id === S.tabId);
     if (tab) tab.hash = hash;
     saveTabs();
   }
@@ -669,7 +682,10 @@
 
   const openTable = (table, extra = {}) => go({ table, tab: 'data', ...fresh, ...extra });
   // A database that has a tab already goes back to where it was left.
-  const openDb = id => (S.tabs.some(t => t.db === id) ? switchTab(id) : go({ db: id, table: null, tab: 'overview', ...fresh }));
+  function openDb(id) {
+    const tab = S.tabs.find(t => t.id === S.tabId && t.db === id) || S.tabs.find(t => t.db === id);
+    return tab ? switchTab(tab.id) : go({ db: id, table: null, tab: 'overview', ...fresh });
+  }
 
   // A change inside the data view (search, filter, sort, page) reloads the rows
   // without rebuilding the toolbar, so the box being typed in keeps its focus.
@@ -693,14 +709,22 @@
     const ids = allDbs().map(d => d.id);
     // The tab of a database that was dropped, or that config.php no longer lists, closes.
     S.tabs = S.tabs.filter(t => ids.includes(t.db));
+    fillGroupTabs();
     const last = store.get('lastDb', null);
     const db = ids.includes(st.db) ? st.db : ids.includes(last) ? last : S.tabs.length ? S.tabs[0].db : ids[0];
 
-    // A database reached without its tab, from the list, a link or Back, gets one beside the open tab.
-    if (!S.tabs.some(t => t.db === db)) {
-      const at = S.tabs.findIndex(t => t.db === S.db);
-      S.tabs.splice(at < 0 ? S.tabs.length : at + 1, 0, { db, hash: '' });
+    // The tab the address names. An address without one, such as a bookmark,
+    // stays in the open tab when it is the same database, else takes any tab
+    // of that database, else opens a new one beside the open tab.
+    let tab = S.tabs.find(t => t.id === st.tabId && t.db === db)
+      || S.tabs.find(t => t.id === S.tabId && t.db === db)
+      || S.tabs.find(t => t.db === db);
+    if (!tab) {
+      tab = { id: newTabId(), db, hash: '' };
+      const at = S.tabs.findIndex(t => t.id === S.tabId);
+      S.tabs.splice(at < 0 ? S.tabs.length : at + 1, 0, tab);
     }
+    S.tabId = tab.id;
 
     if (db !== S.db) {
       const switching = S.db != null;
@@ -925,64 +949,202 @@
 
   // ------------------------------------------------------------ database tabs
 
-  const saveTabs = () => store.set('tabs', S.tabs.map(({ db, hash }) => ({ db, hash })));
+  const saveTabs = () => store.set('tabs', S.tabs.map(({ id, db, hash }) => ({ id, db, hash })));
+
+  // The place a tab was left at, as an address that names that tab. A copy
+  // starts with the address of the tab it copies, so the name is set here.
+  function tabHash(t) {
+    if (!t.hash) return stateToHash({ db: t.db, table: null, tab: 'overview', ...fresh, tabId: t.id });
+    const p = new URLSearchParams(t.hash.slice(1));
+    p.set('dbtab', t.id);
+    return '#' + p.toString();
+  }
+
+  // The table a tab is on, so two tabs of one database can be told apart.
+  function tabTable(t, d) {
+    const key = new URLSearchParams(t.hash.slice(1)).get('t');
+    if (!key) return '';
+    const [schema, ...name] = key.split('.');
+    return tableIn(d, schema, name.join('.'));
+  }
+
+  // The tab a link into database id lands in: the open one for the database
+  // on screen, else its first tab. None means a new tab.
+  const tabOf = id => (id === S.db ? S.tabId : (S.tabs.find(t => t.db === id) || {}).id);
+
+  // Each of your own groups shows in the strip with a tab for every database
+  // in it, so those tabs open by themselves. The first tab of such a database
+  // stays open, or the group would lose it; taking the database out of the
+  // group lets it close.
+  function fillGroupTabs() {
+    const open = new Set(S.tabs.map(t => t.db));
+    for (const d of myGroups().flatMap(g => g.items)) {
+      if (!open.has(d.id)) S.tabs.push({ id: newTabId(), db: d.id, hash: '' });
+    }
+  }
+
+  const isPinned = (t, grouped = dbGroups()) => grouped.has(t.db) && S.tabs.find(x => x.db === t.db) === t;
 
   function switchTab(id) {
-    const tab = S.tabs.find(t => t.db === id);
-    const hash = (tab && tab.hash) || stateToHash({ db: id, table: null, tab: 'overview', ...fresh });
+    const hash = tabHash(S.tabs.find(t => t.id === id));
     if (hash !== location.hash) history.pushState(null, '', hash);
     return route();
   }
 
   // Closing the open tab moves to the one beside it, as a browser does. The last tab stays.
   function closeTabs(ids) {
-    const keep = S.tabs.filter(t => !ids.includes(t.db));
-    if (!keep.length) return;
-    const at = S.tabs.findIndex(t => t.db === S.db);
+    const closing = S.tabs.filter(t => ids.includes(t.id) && !isPinned(t)).map(t => t.id);
+    const keep = S.tabs.filter(t => !closing.includes(t.id));
+    if (!keep.length || !closing.length) return;
+    const at = S.tabs.findIndex(t => t.id === S.tabId);
     S.tabs = keep;
     saveTabs();
-    if (ids.includes(S.db)) switchTab(keep[Math.min(at, keep.length - 1)].db);
+    if (closing.includes(S.tabId)) switchTab(keep[Math.min(at, keep.length - 1)].id);
     else renderDbTabs();
   }
 
-  function tabMenu(e, d) {
-    const others = S.tabs.map(t => t.db).filter(id => id !== d.id);
+  // A second tab of the same database, on the same place, right after it.
+  function duplicateTab(id) {
+    const i = S.tabs.findIndex(t => t.id === id);
+    const copy = { ...S.tabs[i], id: newTabId() };
+    S.tabs.splice(i + 1, 0, copy);
+    switchTab(copy.id);
+  }
+
+  // Moved onto another tab's place: from the left it lands after it, from the right before it.
+  function moveTab(id, target) {
+    const order = moveInList(S.tabs.map(t => t.id), id, target);
+    S.tabs.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
+    saveTabs();
+    renderDbTabs();
+  }
+
+  function tabMenu(e, t, d) {
+    const grouped = dbGroups();
+    const group = grouped.get(t.db) || '';
+    // Left and right stay among the tabs of its own group, or among the tabs in none.
+    const peers = S.tabs.filter(x => (grouped.get(x.db) || '') === group).map(x => x.id);
+    const i = peers.indexOf(t.id);
+    const others = S.tabs.filter(x => x !== t && !isPinned(x, grouped)).map(x => x.id);
     openMenuAt(e, [
       { title: d.name },
-      { label: 'Close tab', icon: 'x', disabled: !others.length, run: () => closeTabs([d.id]) },
+      { label: 'Duplicate tab', icon: 'copy', run: () => duplicateTab(t.id) },
+      { label: 'Move left', icon: 'left', disabled: i <= 0, run: () => moveTab(t.id, peers[i - 1]) },
+      { label: 'Move right', icon: 'right', disabled: i >= peers.length - 1, run: () => moveTab(t.id, peers[i + 1]) },
+      'sep',
+      { label: 'Close tab', icon: 'x', disabled: S.tabs.length < 2 || isPinned(t, grouped), run: () => closeTabs([t.id]) },
       { label: 'Close the other tabs', icon: 'x', disabled: !others.length, run: () => closeTabs(others) },
       'sep',
       { label: 'Copy name', icon: 'copy', run: () => copyText(d.name, 'Database name copied.') },
     ]);
   }
 
-  // Drawn again only when the tabs or the open one change, so a switch's sweep runs to the end.
+  // A folded group shows only its name, and the open tab if it is one of its own.
+  function foldTabGroup(key) {
+    const folded = store.get('foldedTabGroups', []);
+    store.set('foldedTabGroups', folded.includes(key) ? folded.filter(k => k !== key) : [...folded, key]);
+    renderDbTabs();
+  }
+
+  function tabGroupMenu(e, g, folded) {
+    openMenuAt(e, [
+      { title: g.label },
+      { label: 'Find an id in every database', icon: 'key', run: () => openGroupFind(g) },
+      { label: folded ? 'Show its tabs' : 'Fold its tabs', icon: folded ? 'down' : 'right', run: () => foldTabGroup(g.key) },
+      'sep',
+      { label: 'Rename group', icon: 'edit', run: () => renameGroup(g) },
+    ]);
+  }
+
+  // Drawn again only when the tabs, their tables, your groups or the open one change, so a switch's sweep runs to the end.
   function renderDbTabs() {
-    const key = S.tabs.map(t => t.db).join() + '|' + S.db;
+    const groups = myGroups();
+    const grouped = dbGroups();
+    const folded = store.get('foldedTabGroups', []);
+    const labels = new Map(S.tabs.map(t => { const d = dbById(t.db); return [t.id, d ? tabTable(t, d) : '']; }));
+    const key = [
+      groups.map(g => `${g.key}:${g.label}:${g.items.map(d => d.id)}:${folded.includes(g.key)}`).join(),
+      S.tabs.map(t => `${t.id}:${labels.get(t.id)}`).join(),
+      S.tabId,
+    ].join('|');
     if (key === UI.tabsKey) return;
     UI.tabsKey = key;
-    put(UI.dbTabs, S.tabs.map(t => {
+    const order = S.tabs.map(t => t.id);
+    const groupOfTab = id => grouped.get((S.tabs.find(t => t.id === id) || {}).db) || '';
+
+    const tabEl = t => {
       const d = dbById(t.db);
       if (!d) return null;
-      const active = t.db === S.db;
-      return h('div', {
+      const active = t.id === S.tabId;
+      const unmark = () => el.classList.remove('drop-before', 'drop-after');
+      const el = h('div', {
         class: 'db-tab' + (active ? ' active' : ''),
         style: `--c:${dbColor(d)}`,
         // A middle click closes the tab, as in a browser, without starting to scroll.
         onmousedown: e => { if (e.button === 1) e.preventDefault(); },
-        onauxclick: e => { if (e.button === 1) closeTabs([d.id]); },
-        oncontextmenu: e => tabMenu(e, d),
+        onauxclick: e => { if (e.button === 1) closeTabs([t.id]); },
+        oncontextmenu: e => tabMenu(e, t, d),
+        // A tab moves only among the tabs of its own group, or among the tabs in none.
+        ondragover: e => {
+          if (!UI.dragTab || UI.dragTab === t.id || groupOfTab(UI.dragTab) !== groupOfTab(t.id)) return;
+          e.preventDefault();
+          unmark();
+          el.classList.add(order.indexOf(UI.dragTab) < order.indexOf(t.id) ? 'drop-after' : 'drop-before');
+        },
+        ondragleave: unmark,
+        ondrop: e => {
+          const from = UI.dragTab;
+          UI.dragTab = null;
+          unmark();
+          if (!from || from === t.id) return;
+          e.preventDefault();
+          moveTab(from, t.id);
+        },
       },
       h('button', {
         class: 'db-tab-name',
-        title: `${dbKind(d)} on ${d.where}`,
+        title: `${dbKind(d)} on ${d.where}. Drag to move it.`,
+        draggable: 'true',
         'aria-current': active ? 'page' : null,
-        onclick: () => { if (!active) switchTab(d.id); },
-      }, h('span', { class: 'dot' }), h('span', { class: 'grow' }, d.name)),
-      S.tabs.length > 1 ? h('button', { class: 'db-tab-close', title: `Close ${d.name}`, onclick: () => closeTabs([d.id]) }, icon('x')) : null);
-    }));
-    const active = UI.dbTabs.querySelector('.active');
-    if (active) active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        onclick: () => { if (!active) switchTab(t.id); },
+        ondragstart: e => {
+          UI.dragTab = t.id;
+          el.classList.add('dragging');
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', d.name);
+        },
+        ondragend: () => {
+          UI.dragTab = null;
+          el.classList.remove('dragging');
+        },
+      },
+      h('span', { class: 'dot' }),
+      h('span', { class: 'db-tab-db' }, d.name),
+      labels.get(t.id) ? h('small', null, labels.get(t.id)) : null),
+      S.tabs.length > 1 && !isPinned(t, grouped) ? h('button', { class: 'db-tab-close', title: `Close ${d.name}`, onclick: () => closeTabs([t.id]) }, icon('x')) : null);
+      return el;
+    };
+
+    put(UI.dbTabs,
+      groups.map(g => {
+        const shut = folded.includes(g.key);
+        const tabs = S.tabs.filter(t => grouped.get(t.db) === g.key && (!shut || t.id === S.tabId));
+        return h('div', { class: 'tab-group', role: 'group', 'aria-label': g.label },
+          h('div', { class: 'tab-group-head', oncontextmenu: e => tabGroupMenu(e, g, shut) },
+            h('button', {
+              class: 'tab-group-name',
+              title: `${shut ? 'Show' : 'Fold'} the tabs of ${g.label}. Right-click for more.`,
+              'aria-expanded': String(!shut),
+              onclick: () => foldTabGroup(g.key),
+            }, icon(shut ? 'right' : 'down'), h('span', null, g.label), h('span', { class: 'count' }, g.items.length)),
+            h('button', { class: 'tab-group-find', title: `Find an id in every database of ${g.label}`, onclick: () => openGroupFind(g) }, icon('search'))),
+          tabs.map(tabEl));
+      }),
+      S.tabs.filter(t => !grouped.has(t.db)).map(tabEl));
+    // Brought into sight when it changes, not on every redraw, which would close an open menu by scrolling.
+    const active = UI.dbTabs.querySelector('.db-tab.active');
+    if (active && UI.tabsShown !== S.tabId) active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    UI.tabsShown = S.tabId;
   }
 
   function renderView() {
@@ -1137,7 +1299,7 @@
     });
   }
 
-  function openModal({ title, body, actions = [], wide = false, onClose = null }) {
+  function openModal({ title, body, actions = [], wide = false, cls = '', onClose = null }) {
     const close = () => {
       leave(overlay);
       document.removeEventListener('keydown', onKey, true);
@@ -1147,7 +1309,7 @@
       if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
     };
     const overlay = h('div', { class: 'overlay', onmousedown: e => { if (e.target === overlay) close(); } },
-      h('div', { class: 'modal' + (wide ? ' wide' : ''), role: 'dialog', 'aria-modal': 'true' },
+      h('div', { class: 'modal' + (wide ? ' wide' : '') + (cls ? ' ' + cls : ''), role: 'dialog', 'aria-modal': 'true' },
         h('div', { class: 'modal-head' },
           h('h3', null, title),
           h('button', { class: 'btn ghost icon-only', title: 'Close (Esc)', onclick: close }, icon('x'))),
@@ -1304,6 +1466,11 @@
 
   const groupKeys = () => viewGroups().filter(g => !g.hidden).map(g => g.key);
   const isHidden = d => S.layout.hidden.includes(d.id);
+  // Your own groups that hold a database, which the tab strip shows, and the
+  // group key of each database in one of them.
+  const myGroups = () => viewGroups().filter(g => g.mine && g.items.length);
+  const dbGroups = () => new Map(myGroups().flatMap(g => g.items.map(d => [d.id, g.key])));
+  const groupOf = id => myGroups().find(g => g.items.some(d => d.id === id)) || null;
 
   // Moves an entry onto another's place: dragged down it lands below the
   // target, dragged up or in from elsewhere it lands above. No target is the end.
@@ -1331,19 +1498,27 @@
   let layoutSaving = Promise.resolve();
   let dbMenu = null;
 
+  // The open list and the tab strip both show the layout.
+  function showLayout() {
+    if (dbMenu && dbMenu.el.isConnected) dbMenu.draw();
+    fillGroupTabs();
+    saveTabs();
+    renderDbTabs();
+  }
+
   function changeLayout(change, message = null) {
     const before = S.layout;
     const next = structuredClone(before);
     change(next);
     S.layout = next;
-    if (dbMenu && dbMenu.el.isConnected) dbMenu.draw();
+    showLayout();
     layoutSaving = layoutSaving
       .then(() => api('layout', { layout: next }))
       .then(() => {
         if (message) toast(message, 'ok', { label: 'Undo', run: () => changeLayout(L => Object.assign(L, structuredClone(before))) });
       }, e => {
         S.layout = before;
-        if (dbMenu && dbMenu.el.isConnected) dbMenu.draw();
+        showLayout();
         toast(e.message, 'error');
       });
   }
@@ -1371,7 +1546,6 @@
   async function renameGroup(g) {
     const label = await askText({ title: 'Rename group', value: g.label });
     if (label && label !== g.label) changeLayout(L => { L.groups.find(x => x.id === g.key).label = label; });
-    reopenDbMenu();
   }
 
   async function resetLayout() {
@@ -1414,7 +1588,9 @@
       g.hidden
         ? { label: 'Show them all again', icon: 'view', run: andReopen(() => changeLayout(L => { L.hidden = []; })) }
         : [
-          g.mine ? { label: 'Rename', icon: 'edit', run: () => renameGroup(g) } : null,
+          g.mine ? { label: 'Rename', icon: 'edit', run: () => renameGroup(g).then(reopenDbMenu) } : null,
+          // The whole group, not only the databases a search in the list left showing.
+          g.mine && g.items.length ? { label: 'Find an id in every database', icon: 'key', run: () => openGroupFind(myGroups().find(x => x.key === g.key)) } : null,
           { label: 'Move up', icon: 'up', disabled: i <= 0, run: moveTo(keys[i - 1]) },
           { label: 'Move down', icon: 'down', disabled: i >= keys.length - 1, run: moveTo(keys[i + 1]) },
         ],
@@ -1700,6 +1876,170 @@
         h('button', { class: 'btn', onclick: () => go({ tab: 'sql' }) }, icon('code'), 'Open SQL')),
       h('div', { class: 'grid-wrap' }, h('table', { class: 'grid overview-table' }, thead, tbody))));
     draw();
+  }
+
+  // ----------------------------------------------------------------- find id
+
+  const findId = value => go({ table: null, tab: 'find', ...fresh, findId: String(value).trim() });
+  const looksLikeUuid = v => /^\{?[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}\}?$/i.test(v);
+  const FIND_PLACEHOLDER = 'A uuid, a number or a code';
+
+  // Every row of the database that holds one id, a table to a card. A click
+  // on a column opens the table showing only those rows.
+  let findSeq = 0;
+  function renderFind() {
+    const seq = ++findSeq;
+    const db = dbById(S.db);
+    const group = groupOf(S.db);
+    const results = h('div', { class: 'find-results' });
+    UI.findInput = h('input', { class: 'input', type: 'search', value: S.findId, placeholder: FIND_PLACEHOLDER, spellcheck: false, autocomplete: 'off' });
+    const form = h('form', {
+      class: 'find-form',
+      onsubmit: e => {
+        e.preventDefault();
+        if (UI.findInput.value.trim()) findId(UI.findInput.value);
+      },
+    },
+    h('label', { class: 'search' }, icon('key'), UI.findInput),
+    h('button', { class: 'btn primary', type: 'submit' }, icon('search'), 'Find'),
+    group ? h('button', {
+      class: 'btn',
+      type: 'button',
+      title: `Look in every database of ${group.label} at once`,
+      onclick: () => openGroupFind(group, UI.findInput.value),
+    }, icon('database'), `Find in ${group.label}`) : null);
+
+    put(UI.view, h('div', { class: 'find' },
+      h('div', { class: 'find-head' },
+        h('h2', null, 'Find an id'),
+        h('p', { class: 'muted' }, `Paste an id to see every row of ${db.name} that holds it: in a primary key, a foreign key, a unique column such as a code, `
+          + 'or any other uuid column. That last kind catches a column that points into another database, which cannot have a foreign key.'),
+        form),
+      results));
+
+    if (!S.findId) {
+      UI.findInput.focus();
+      return;
+    }
+    put(results, skeleton('cards', 'Looking in every table'));
+    api('find_id', { db: S.db, value: S.findId })
+      .then(r => { if (seq === findSeq) put(results, findResults(r)); })
+      .catch(e => { if (seq === findSeq) put(results, errorBox(e.message)); });
+  }
+
+  const foundRows = found => found.reduce((sum, f) => sum + f.rows, 0);
+
+  function findResults(r) {
+    const searched = `Looked in ${plural(r.searched, 'column')} in ${fmtDuration(r.ms)}.`;
+    if (!r.found.length) {
+      return h('div', { class: 'find-empty' }, h('b', null, 'No row holds this id.'), h('span', { class: 'muted' }, searched));
+    }
+    const cards = findCards(r.found, dbById(S.db), S.findId, go);
+    return [
+      h('p', { class: 'find-summary' }, h('b', null, `${plural(foundRows(r.found), 'row')} in ${plural(cards.length, 'table')}.`), ' ', h('span', { class: 'muted' }, searched)),
+      cards,
+    ];
+  }
+
+  // The hits in database d, a card to a table. open moves to a hit's rows.
+  function findCards(found, d, value, open) {
+    const byTable = new Map();
+    for (const f of found) {
+      const key = tableKey(f.table);
+      if (!byTable.has(key)) byTable.set(key, { table: f.table, hits: [] });
+      byTable.get(key).hits.push(f);
+    }
+    // The row the id belongs to comes first, then the rows that point at it.
+    const own = g => (g.hits.some(f => f.role === 'pk' || f.role === 'uq') ? 0 : 1);
+    const label = t => tableIn(d, t.schema, t.name);
+    const groups = [...byTable.values()].sort((a, b) => own(a) - own(b) || label(a.table).localeCompare(label(b.table)));
+    return groups.map((g, i) => h('section', { class: 'find-table', style: `--i:${Math.min(i, 12)}` },
+      h('header', null, icon('table'), h('b', null, label(g.table))),
+      g.hits.map(f => findHit(f, d, value, open))));
+  }
+
+  function findHit(f, d, value, open) {
+    const target = { db: d.id, tabId: tabOf(d.id), table: f.table, tab: 'data', ...fresh, filters: [{ col: f.column, op: 'eq', value }] };
+    const to = f.points ? `${tableIn(d, f.points.schema, f.points.tbl)}.${f.points.col}` : null;
+    const badge = {
+      pk: h('span', { class: 'badge', title: 'Primary key' }, 'PK'),
+      fk: h('span', { class: 'badge fk', title: `Foreign key to ${to}` }, 'FK'),
+      uq: h('span', { class: 'badge', title: 'A column in a unique index, such as a code' }, 'UQ'),
+      id: h('span', { class: 'badge plain', title: 'A uuid column with no foreign key. It may point into another database.' }, 'ID'),
+    }[f.role];
+    return h('a', {
+      class: 'find-hit',
+      href: stateToHash(target),
+      onclick: e => {
+        if (e.ctrlKey || e.metaKey || e.shiftKey) return;
+        e.preventDefault();
+        open(target);
+      },
+    },
+    h('span', { class: 'find-col mono' }, f.column),
+    badge,
+    h('span', { class: 'grow muted' }, f.label || (to ? `points to ${to}` : '')),
+    h('span', { class: 'count' }, plural(f.rows, 'row')),
+    icon('arrow'));
+  }
+
+  // One id in every database of one of your groups at once, in a dialog. The
+  // databases of a group usually belong to one project, so an id made in one
+  // turns up in the others, where no foreign key can follow it.
+  let groupFindSeq = 0;
+  function openGroupFind(g, value = '') {
+    const input = h('input', { class: 'input', type: 'search', value: value.trim(), placeholder: FIND_PLACEHOLDER, spellcheck: false, autocomplete: 'off' });
+    const results = h('div', { class: 'find-results' });
+    const run = () => {
+      const v = input.value.trim();
+      if (!v) return;
+      const seq = ++groupFindSeq;
+      put(results, skeleton('cards', `Looking in ${plural(g.items.length, 'database')}`));
+      Promise.allSettled(g.items.map(d => api('find_id', { db: d.id, value: v }))).then(answers => {
+        if (seq === groupFindSeq) put(results, groupFindResults(g, v, answers, modal));
+      });
+    };
+    const modal = openModal({
+      title: `Find an id in ${g.label}`,
+      cls: 'find-modal',
+      body: h('div', { class: 'group-find' },
+        h('p', null, `Looks in every primary key, foreign key, unique column and uuid column of ${g.items.map(d => d.name).join(', ')}.`),
+        h('form', { class: 'find-form', onsubmit: e => { e.preventDefault(); run(); } },
+          h('label', { class: 'search' }, icon('key'), input),
+          h('button', { class: 'btn primary', type: 'submit' }, icon('search'), 'Find')),
+        results),
+    });
+    input.focus();
+    input.select();
+    if (input.value) run();
+  }
+
+  // A database with hits gets a section of its own. The ones without are named in one line at the end.
+  function groupFindResults(g, value, answers, modal) {
+    const open = target => { modal.close(); go(target); };
+    const columns = answers.reduce((sum, a) => sum + (a.status === 'fulfilled' ? a.value.searched : 0), 0);
+    const searched = `Looked in ${plural(columns, 'column')} of ${plural(g.items.length, 'database')}.`;
+    const found = [];
+    const failed = [];
+    const none = [];
+    g.items.forEach((d, i) => {
+      const a = answers[i];
+      if (a.status === 'rejected') failed.push({ d, message: a.reason.message });
+      else if (a.value.found.length) found.push({ d, hits: a.value.found });
+      else none.push(d);
+    });
+    const head = (d, ...extra) => h('header', { class: 'find-db-head' }, h('span', { class: 'dot' }), h('b', null, d.name), d.note ? h('span', { class: 'tag' }, d.note) : null, extra);
+    const rows = found.reduce((sum, x) => sum + foundRows(x.hits), 0);
+    return [
+      found.length
+        ? h('div', { class: 'find-summary' }, h('b', null, `${plural(rows, 'row')} in ${plural(found.length, 'database')}.`), ' ', h('span', { class: 'muted' }, searched))
+        : h('div', { class: 'find-empty' }, h('b', null, failed.length ? 'No other database holds this id.' : 'No database of this group holds this id.'), h('span', { class: 'muted' }, searched)),
+      found.map(({ d, hits }) => h('section', { class: 'find-db', style: `--c:${dbColor(d)}` },
+        head(d, h('span', { class: 'muted small' }, plural(foundRows(hits), 'row'))),
+        findCards(hits, d, value, open))),
+      failed.map(({ d, message }) => h('section', { class: 'find-db', style: `--c:${dbColor(d)}` }, head(d), errorBox(message))),
+      found.length && none.length ? h('div', { class: 'find-none muted small' }, `Not in ${none.map(d => d.name).join(', ')}.`) : null,
+    ];
   }
 
   // ----------------------------------------------------------------- formats
@@ -4889,6 +5229,8 @@
       return [
         ...tables,
         ...allDbs().filter(d => !isHidden(d)).map(d => ({ kind: 'Database', label: d.name, hint: d.group, icon: 'database', run: () => openDb(d.id) })),
+        { kind: 'Action', label: 'Find an id in every table', icon: 'key', run: () => findId('') },
+        ...myGroups().map(g => ({ kind: 'Action', label: `Find an id in ${g.label}`, hint: plural(g.items.length, 'database'), icon: 'key', run: () => openGroupFind(g) })),
         { kind: 'Action', label: 'Diagram of this database', icon: 'diagram', run: () => go({ table: null, tab: 'diagram', ...fresh }) },
         { kind: 'Action', label: 'Open the SQL tab', icon: 'code', run: () => go({ tab: 'sql' }) },
         { kind: 'Action', label: 'Health of this database', icon: 'gauge', run: () => go({ table: null, tab: 'health', ...fresh }) },
@@ -4905,13 +5247,21 @@
     const close = () => leave(overlay);
     const pick = i => { const it = items[i]; close(); if (it) it.run(); };
     const draw = () => {
-      const q = input.value.trim().toLowerCase();
-      items = everything()
+      const raw = input.value.trim();
+      const q = raw.toLowerCase();
+      // A pasted uuid names no table, so the first choice is to look for it,
+      // here and then in every database of the group this one is in.
+      const group = groupOf(S.db);
+      const lookFor = looksLikeUuid(raw) ? [
+        { kind: 'Action', label: `Find ${raw} in every table`, icon: 'key', run: () => findId(raw) },
+        group ? { kind: 'Action', label: `Find ${raw} in ${group.label}`, icon: 'key', run: () => openGroupFind(group, raw) } : null,
+      ].filter(Boolean) : [];
+      items = [...lookFor, ...everything()
         .map((it, order) => ({ it, order, score: fuzzy(q, it.label.toLowerCase()) }))
         .filter(x => x.score >= 0 || !q)
         .sort((a, b) => b.score - a.score || a.order - b.order)
         .slice(0, 80)
-        .map(x => x.it);
+        .map(x => x.it)];
       active = Math.min(active, Math.max(0, items.length - 1));
       put(list, items.map((it, i) => h('button', {
         class: 'palette-item',

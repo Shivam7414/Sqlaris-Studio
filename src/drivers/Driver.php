@@ -76,8 +76,10 @@ abstract class DbvDriver
 
     /**
      * Every table and view tables() lists, in the same order, for the diagram:
-     * schema, name, kind, columns (name and type), pk (column names) and fks,
-     * each fk in the shape table() gives (name, schema, tbl, cols, ref_cols).
+     * schema, name, kind, columns (name, type and category, plus native on
+     * MySQL, enough to look a value up in them), pk (column names), unique
+     * (the other columns in a unique index, such as a code) and fks, each fk in the
+     * shape table() gives (name, schema, tbl, cols, ref_cols).
      * It reads the catalog in a fixed number of queries, however many tables.
      *
      * @return list<array<string, mixed>>

@@ -546,17 +546,35 @@ function dbv_action_update_each(DbvDriver $d, array $t, array $req): array
 function dbv_action_lookup(DbvDriver $d, array $t, array $req): array
 {
     $column = dbv_column($t, (string) ($req['col'] ?? ''));
+    $q = trim((string) ($req['q'] ?? ''));
+    $label = dbv_label($d, $t['columns'], $column['name']) ?? 'null';
+
+    return ['items' => dbv_all($d->pdo,
+        'select '.$d->text($d->col($column['name']), $column).' as value, '.$label.' as label from '.$d->from($t)
+        .($q === '' ? '' : ' where '.$d->rowText($t).' '.$d->ilike().' ?')
+        .' order by 2, 1 limit 25',
+        $q === '' ? [] : ['%'.dbv_like($q).'%'])];
+}
+
+/**
+ * The SQL that names a row to a person: up to two of the label_columns in
+ * config.php, or else the first text column. Null when the table has
+ * neither. The column the row was found by is left out, since it is already
+ * on screen.
+ */
+function dbv_label(DbvDriver $d, array $columns, string $except): ?string
+{
     $labels = [];
 
     foreach ((array) dbv_config('label_columns') as $name) {
-        if (isset($t['columns'][$name]) && $name !== $column['name'] && count($labels) < 2) {
-            $labels[] = $t['columns'][$name];
+        if (isset($columns[$name]) && $name !== $except && count($labels) < 2) {
+            $labels[] = $columns[$name];
         }
     }
 
     if ($labels === []) {
-        foreach ($t['columns'] as $c) {
-            if ($c['category'] === 'text' && $c['name'] !== $column['name']) {
+        foreach ($columns as $c) {
+            if ($c['category'] === 'text' && $c['name'] !== $except) {
                 $labels[] = $c;
 
                 break;
@@ -564,14 +582,95 @@ function dbv_action_lookup(DbvDriver $d, array $t, array $req): array
         }
     }
 
-    $q = trim((string) ($req['q'] ?? ''));
-    $label = $labels === [] ? 'null' : "concat_ws(', ', ".implode(', ', array_map(fn ($c) => $d->text($d->col($c['name']), $c), $labels)).')';
+    return $labels === [] ? null : "concat_ws(', ', ".implode(', ', array_map(fn ($c) => $d->text($d->col($c['name']), $c), $labels)).')';
+}
 
-    return ['items' => dbv_all($d->pdo,
-        'select '.$d->text($d->col($column['name']), $column).' as value, '.$label.' as label from '.$d->from($t)
-        .($q === '' ? '' : ' where '.$d->rowText($t).' '.$d->ilike().' ?')
-        .' order by 2, 1 limit 25',
-        $q === '' ? [] : ['%'.dbv_like($q).'%'])];
+/**
+ * Every column of the database that holds one id, with how many rows hold it.
+ * It looks in each primary key, foreign key and unique column, the last for a
+ * code such as an employee code, and in every other uuid column too, because
+ * a column that points into another database cannot have a foreign key. A
+ * value is only compared with a column of a type it could be, so the
+ * comparison uses the column's index.
+ */
+function dbv_action_find_id(DbvDriver $d, array $req): array
+{
+    $value = trim((string) ($req['value'] ?? ''));
+
+    if ($value === '' || strlen($value) > 200) {
+        throw new DbvError('Type the id to look for, at most 200 characters.');
+    }
+
+    $fits = [
+        'uuid' => (bool) preg_match('/^\{?[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}\}?$/i', $value),
+        'number' => (bool) preg_match('/^-?\d+$/', $value),
+        'text' => true,
+    ];
+    // One count per column adds up on a big database.
+    set_time_limit(0);
+    $started = hrtime(true);
+    $found = [];
+    $searched = 0;
+
+    foreach ($d->diagram() as $t) {
+        if (! in_array($t['kind'], ['table', 'partitioned table'], true)) {
+            continue;
+        }
+
+        $columns = array_column($t['columns'], null, 'name');
+        $points = [];
+
+        foreach ($t['fks'] as $fk) {
+            foreach ($fk['cols'] as $i => $col) {
+                $points[$col] ??= ['schema' => $fk['schema'], 'tbl' => $fk['tbl'], 'col' => $fk['ref_cols'][$i]];
+            }
+        }
+
+        foreach ($columns as $name => $column) {
+            $inPk = in_array($name, $t['pk'], true);
+            $unique = in_array($name, $t['unique'], true);
+            $isKey = $inPk || $unique || isset($points[$name]);
+
+            if (! ($fits[$column['category']] ?? false) || (! $isKey && $column['category'] !== 'uuid')) {
+                continue;
+            }
+
+            // A value longer than the column cannot be in it. The cast to char(2)
+            // would also cut "US-000001" down to "US" and find the wrong rows.
+            if (preg_match('/char(?:acter)?(?: varying)?\((\d+)\)/i', $column['type'], $size) && mb_strlen($value) > (int) $size[1]) {
+                continue;
+            }
+
+            // A row found by its whole primary key, or by a code, is the thing the id names, so it gets a label.
+            $label = $t['pk'] === [$name] || $unique ? dbv_label($d, $columns, $name) : null;
+
+            try {
+                $hit = dbv_one($d->pdo,
+                    'select count(*) as n'.($label === null ? '' : ", max({$label}) as label")
+                    .' from '.$d->from($t).' where '.$d->col($name).' = '.$d->param($column),
+                    [$d->value($column, $value)]);
+            } catch (PDOException) {
+                // Too big for the column's number type, or not one of its enum values, so it cannot be there.
+                continue;
+            }
+
+            $searched++;
+
+            if ((int) $hit['n'] > 0) {
+                $found[] = [
+                    'table' => ['schema' => $t['schema'], 'name' => $t['name']],
+                    'column' => $name,
+                    'type' => $column['type'],
+                    'role' => $inPk ? 'pk' : (isset($points[$name]) ? 'fk' : ($unique ? 'uq' : 'id')),
+                    'points' => $points[$name] ?? null,
+                    'rows' => (int) $hit['n'],
+                    'label' => $hit['label'] ?? null,
+                ];
+            }
+        }
+    }
+
+    return ['found' => $found, 'searched' => $searched, 'ms' => (int) round((hrtime(true) - $started) / 1e6)];
 }
 
 /**

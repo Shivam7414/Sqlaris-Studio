@@ -377,14 +377,20 @@ final class DbvMysql extends DbvDriver
         foreach (dbv_all($this->pdo,
             'select table_name as name, table_type as type from information_schema.tables where table_schema = ? order by table_name',
             [$this->database]) as $t) {
-            $tables[$t['name']] = ['schema' => $this->database, 'name' => $t['name'], 'kind' => self::KINDS[$t['type']] ?? 'table', 'columns' => [], 'pk' => [], 'fks' => []];
+            $tables[$t['name']] = ['schema' => $this->database, 'name' => $t['name'], 'kind' => self::KINDS[$t['type']] ?? 'table', 'columns' => [], 'pk' => [], 'unique' => [], 'fks' => []];
         }
 
         foreach (dbv_all($this->pdo,
-            'select table_name as tbl, column_name as name, column_type as type from information_schema.columns
+            'select table_name as tbl, column_name as name, column_type as type, data_type as native from information_schema.columns
             where table_schema = ? order by table_name, ordinal_position', [$this->database]) as $column) {
             if (isset($tables[$column['tbl']])) {
-                $tables[$column['tbl']]['columns'][] = ['name' => $column['name'], 'type' => $column['type']];
+                $native = strtolower($column['native']);
+                $tables[$column['tbl']]['columns'][] = [
+                    'name' => $column['name'],
+                    'type' => $column['type'],
+                    'native' => $native,
+                    'category' => $this->category($native, strtolower($column['type'])),
+                ];
             }
         }
 
@@ -410,6 +416,15 @@ final class DbvMysql extends DbvDriver
 
         foreach ($fks as $tbl => $rows) {
             $tables[$tbl]['fks'] = $this->group($rows);
+        }
+
+        // A functional index has no column name, so it is left out.
+        foreach (dbv_all($this->pdo,
+            "select distinct table_name as tbl, column_name as col from information_schema.statistics
+            where table_schema = ? and non_unique = 0 and index_name <> 'PRIMARY' and column_name is not null", [$this->database]) as $unique) {
+            if (isset($tables[$unique['tbl']])) {
+                $tables[$unique['tbl']]['unique'][] = $unique['col'];
+            }
         }
 
         return array_values($tables);

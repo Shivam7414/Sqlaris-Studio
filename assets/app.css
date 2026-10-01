@@ -518,7 +518,7 @@ body.busy .progress { opacity: 1; }
   display: flex;
   align-items: center;
   flex-shrink: 0;
-  max-width: 240px;
+  max-width: 280px;
   height: 34px;
   padding-right: 6px;
   border: 1px solid transparent;
@@ -539,6 +539,15 @@ body.busy .progress { opacity: 1; }
 .db-tab-name .grow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .db-tab-name:focus-visible { outline-offset: -3px; border-radius: var(--r); }
 .db-tab.active .db-tab-name { font-weight: 650; cursor: default; }
+.db-tab-db { flex-shrink: 0; white-space: nowrap; }
+/* The table the tab is on, which tells two tabs of one database apart. */
+.db-tab-name small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font-size: 12px; font-weight: 500; }
+.db-tab.active .db-tab-name small { color: var(--muted); }
+/* Dragging a tab: it fades, and a bar shows the side of the tab it would land on. */
+.db-tab.dragging { opacity: .45; }
+.db-tab.drop-before::before, .db-tab.drop-after::before { content: ""; position: absolute; top: 7px; bottom: 7px; width: 2px; border-radius: 2px; background: var(--accent); box-shadow: 0 0 8px var(--accent-glow); }
+.db-tab.drop-before::before { left: 0; }
+.db-tab.drop-after::before { right: 0; }
 .db-tab .dot { background: var(--c); }
 .db-tab.active .dot { background: var(--db-mark); box-shadow: 0 0 0 3px var(--db-soft), 0 0 10px var(--db-mark); }
 .db-tab-close { display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: var(--r-sm); background: none; color: var(--faint); cursor: pointer; opacity: 0; transition: opacity var(--fast), background var(--fast), color var(--fast); }
@@ -546,6 +555,19 @@ body.busy .progress { opacity: 1; }
 .db-tab:hover .db-tab-close, .db-tab.active .db-tab-close, .db-tab-close:focus-visible { opacity: 1; }
 .db-tab-close:hover { background: var(--hover); color: var(--ink); }
 .db-tab-add { align-self: center; flex-shrink: 0; }
+/* One of your own groups: its name, a search across its databases, and a tab
+   for each of them, on a tray of their own. */
+.tab-group { display: flex; align-items: flex-end; gap: 2px; flex-shrink: 0; height: 40px; padding: 0 3px; border: 1px solid var(--line); border-bottom: 0; border-radius: 12px 12px 0 0; background: var(--field); }
+.tab-group + .tab-group, .tab-group + .db-tab { margin-left: 6px; }
+/* Level with the middle of the tabs beside it. */
+.tab-group-head { display: flex; align-items: center; flex-shrink: 0; height: 28px; margin: 0 4px 3px 1px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--hover); }
+.tab-group-name { display: flex; align-items: center; gap: 6px; height: 100%; padding: 0 8px; border: 0; background: none; color: var(--ink-2); font-size: 12.5px; font-weight: 650; white-space: nowrap; cursor: pointer; }
+.tab-group-name .i { width: 12px; height: 12px; color: var(--faint); }
+.tab-group-name .count { color: var(--faint); font-weight: 500; font-variant-numeric: tabular-nums; }
+.tab-group-find { display: grid; place-items: center; width: 24px; height: 22px; margin-right: 2px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--muted); cursor: pointer; transition: background var(--fast), color var(--fast); }
+.tab-group-find .i { width: 14px; height: 14px; }
+.tab-group-find:hover { background: var(--pill); color: var(--ink); }
+.tab-group-name:focus-visible, .tab-group-find:focus-visible { outline-offset: -2px; }
 /* A light sweeps across the tab of the database just switched to. */
 .db-tab::after {
   content: "";
@@ -1292,6 +1314,41 @@ pre.code {
 .row-actions .danger { --tone: var(--danger); --tone-soft: var(--danger-soft); }
 /* A line under a row count, so the biggest tables stand out. */
 .meter { position: absolute; right: 28px; bottom: 5px; height: 3px; border-radius: 3px; background: var(--accent-line); box-shadow: 0 0 8px var(--accent-glow); }
+
+/* ----------------------------------------------------------------- find id */
+
+.find { display: flex; flex-direction: column; gap: 14px; width: 100%; max-width: 1040px; padding: 28px; }
+.find-head p { max-width: 760px; margin: 6px 0 16px; }
+.find-form { display: flex; gap: 8px; }
+.find-form .search { flex: 1; }
+.find-form .search input { width: 100%; height: 40px; font: 13px var(--mono); }
+.find-form .btn { height: 40px; }
+.find-results { display: flex; flex-direction: column; gap: 12px; }
+.find-results .skeleton { padding: 0; }
+.find-summary { margin: 4px 0 0; }
+.find-empty { display: flex; flex-direction: column; gap: 4px; padding: 22px; border: 1px dashed var(--line-strong); border-radius: var(--r-lg); }
+/* The cards rise in one after another. --i is set by app.js. */
+.find-table { border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); overflow: hidden; animation: rise .4s var(--ease-out) both; animation-delay: calc(var(--i, 0) * 35ms); }
+.find-table header { display: flex; align-items: center; gap: 9px; padding: 10px 16px; background: var(--sunken); border-bottom: 1px solid var(--line); }
+.find-table header .i { color: var(--faint); }
+.find-hit { display: flex; align-items: center; gap: 12px; padding: 10px 16px; color: var(--ink); transition: background var(--fast); }
+.find-hit + .find-hit { border-top: 1px solid var(--line-soft); }
+.find-hit:hover { background: var(--hover); text-decoration: none; }
+.find-col { flex: 0 0 auto; width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.find-hit .count { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--accent-ink); white-space: nowrap; }
+.find-hit > .i { width: 14px; height: 14px; color: var(--faint); transition: transform var(--normal) var(--ease-out), color var(--fast); }
+.find-hit:hover > .i { transform: translateX(3px); color: var(--accent); }
+/* Find an id across a group: a section to each database with hits. */
+.modal.find-modal { width: min(880px, 94vw); }
+.find-modal .modal-body { max-height: 72vh; }
+.group-find { display: flex; flex-direction: column; gap: 14px; }
+.group-find > p { margin: 0; }
+.find-db { display: flex; flex-direction: column; gap: 10px; }
+.find-db + .find-db { padding-top: 14px; border-top: 1px solid var(--line); }
+.find-db-head { display: flex; align-items: center; gap: 9px; }
+.find-db-head .dot { background: var(--c); box-shadow: 0 0 8px var(--c); }
+.find-db-head .muted { margin-left: auto; }
+.find-none { padding-top: 12px; border-top: 1px solid var(--line); }
 
 /* --------------------------------------------------------------- structure */
 

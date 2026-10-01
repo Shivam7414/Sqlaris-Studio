@@ -278,16 +278,21 @@ final class DbvPgsql extends DbvDriver
             from pg_class c join pg_namespace n on n.oid = c.relnamespace
             where ".self::LISTED."
             order by n.nspname <> 'public', n.nspname, c.relname") as $t) {
-            $tables[(int) $t['oid']] = ['schema' => $t['schema'], 'name' => $t['name'], 'kind' => self::KINDS[$t['kind']], 'columns' => [], 'pk' => [], 'fks' => []];
+            $tables[(int) $t['oid']] = ['schema' => $t['schema'], 'name' => $t['name'], 'kind' => self::KINDS[$t['kind']], 'columns' => [], 'pk' => [], 'unique' => [], 'fks' => []];
         }
 
         foreach (dbv_all($this->pdo,
-            'select a.attrelid as oid, a.attname as name, format_type(a.atttypid, a.atttypmod) as type
+            'select a.attrelid as oid, a.attname as name, format_type(a.atttypid, a.atttypmod) as type, t.typcategory as category
             from pg_attribute a
+            join pg_type t on t.oid = a.atttypid
             join pg_class c on c.oid = a.attrelid join pg_namespace n on n.oid = c.relnamespace
             where a.attnum > 0 and not a.attisdropped and '.self::LISTED.'
             order by a.attrelid, a.attnum') as $column) {
-            $tables[(int) $column['oid']]['columns'][] = ['name' => $column['name'], 'type' => $column['type']];
+            $tables[(int) $column['oid']]['columns'][] = [
+                'name' => $column['name'],
+                'type' => $column['type'],
+                'category' => $this->category($column['category'], $column['type']),
+            ];
         }
 
         foreach (dbv_all($this->pdo,
@@ -299,6 +304,17 @@ final class DbvPgsql extends DbvDriver
             group by ix.indrelid') as $pk) {
             if (isset($tables[(int) $pk['oid']])) {
                 $tables[(int) $pk['oid']]['pk'] = json_decode($pk['cols'], true);
+            }
+        }
+
+        foreach (dbv_all($this->pdo,
+            'select ix.indrelid as oid, json_agg(distinct a.attname) as cols
+            from pg_index ix
+            join pg_attribute a on a.attrelid = ix.indrelid and a.attnum = any(ix.indkey::int2[])
+            where ix.indisunique and not ix.indisprimary
+            group by ix.indrelid') as $unique) {
+            if (isset($tables[(int) $unique['oid']])) {
+                $tables[(int) $unique['oid']]['unique'] = json_decode($unique['cols'], true);
             }
         }
 

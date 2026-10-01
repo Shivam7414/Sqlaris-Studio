@@ -92,6 +92,7 @@ try {
         'copy_table' => dbv_action_copy_table($d, $table(), $req),
         'save_column' => dbv_action_save_column($d, $table(), $req),
         'drop_column' => dbv_action_drop_column($d, $table(), $req),
+        'find_id' => dbv_action_find_id($d, $req),
         'health' => dbv_action_health($d),
         'activity' => dbv_action_activity($d),
         'stop' => dbv_action_stop($d, $req),
