@@ -188,6 +188,14 @@ function api_tests(string $tag, string $driver, TestClient $c, string $db, PDO $
         check(isset($c->ok('health', ['db' => $db])['findings']), 'health');
         check(isset($c->ok('activity', ['db' => $db])['sessions']), 'activity');
 
+        $found = $c->ok('find_id', ['db' => $db, 'value' => '1'])['found'];
+        $hit = fn (string $table, string $column) => array_values(array_filter($found, fn ($f) => $f['table']['name'] === $table && $f['column'] === $column))[0] ?? null;
+        same('apple', $hit('items', 'id')['label'] ?? null, 'find_id names the row its primary key holds');
+        same(2, $hit('item_tags', 'item_id')['rows'] ?? null, 'find_id finds item 1 in both of its tags');
+        same('fk', $hit('item_tags', 'item_id')['role'] ?? null, 'item_tags.item_id is a foreign key');
+        same(null, $hit('items', 'name'), 'a plain text column is not searched');
+        $c->refused('find_id', ['db' => $db, 'value' => ''], 'Type the id');
+
         $op = $tables['info']['maintenance'][1]['op'];
         check(isset($c->ok('maintain', $items + ['op' => $op])['after']), "maintain {$op}");
         $c->refused('maintain', $items + ['op' => 'drop'], 'no such upkeep');
