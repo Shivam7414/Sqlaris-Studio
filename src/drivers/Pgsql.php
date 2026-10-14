@@ -290,7 +290,7 @@ final class DbvPgsql extends DbvDriver
         }
 
         foreach (dbv_all($this->pdo,
-            'select a.attrelid as oid, a.attname as name, format_type(a.atttypid, a.atttypmod) as type, t.typcategory as category
+            'select a.attrelid as oid, a.attname as name, format_type(a.atttypid, a.atttypmod) as type, t.typcategory as category, t.typname
             from pg_attribute a
             join pg_type t on t.oid = a.atttypid
             join pg_class c on c.oid = a.attrelid join pg_namespace n on n.oid = c.relnamespace
@@ -299,7 +299,7 @@ final class DbvPgsql extends DbvDriver
             $tables[(int) $column['oid']]['columns'][] = [
                 'name' => $column['name'],
                 'type' => $column['type'],
-                'category' => $this->category($column['category'], $column['type']),
+                'category' => $this->category($column['category'], $column['type'], $column['typname']),
             ];
         }
 
