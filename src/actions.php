@@ -128,11 +128,53 @@ function dbv_in(string $text, string $value): array
     return ["{$text} in (".implode(', ', array_fill(0, count($items), '?')).')', $items];
 }
 
-function dbv_order(DbvDriver $d, array $t, mixed $sort): string
+/**
+ * The nearest-rows search: how far each row's vector is from the one the
+ * page gave, or from the vector of the row whose key it gave. Null when the
+ * page did not ask.
+ *
+ * @return array{0: string, 1: list<string>}|null the distance and its one value
+ */
+function dbv_near(DbvDriver $d, array $t, mixed $near): ?array
+{
+    if (! is_array($near)) {
+        return null;
+    }
+
+    $column = dbv_column($t, (string) ($near['col'] ?? ''));
+
+    if ($column['category'] !== 'vector') {
+        throw new DbvError("{$column['name']} is not a vector column, so rows cannot be measured by it.");
+    }
+
+    $c = $d->col($column['name']);
+    $distance = $d->distance($c, (string) ($near['metric'] ?? ''), $d->param($column));
+
+    if (isset($near['key'])) {
+        [$where, $params] = dbv_key_where($d, $t, $near['key']);
+        $statement = $d->pdo->prepare('select '.$d->text($c, $column).' from '.$d->from($t)." where {$where}");
+        $statement->execute($params);
+        $row = $statement->fetch(PDO::FETCH_NUM) ?: throw new DbvError('That row is not there any more. Refresh and try again.');
+        $to = $row[0] ?? throw new DbvError("That row has no value in {$column['name']}, so there is nothing to measure from.");
+    } else {
+        $to = trim((string) ($near['to'] ?? ''));
+    }
+
+    if ($to === '') {
+        throw new DbvError('Give a vector to measure from, such as [0.1, 0.2, 0.3].');
+    }
+
+    return [$distance, [$d->value($column, $to)]];
+}
+
+/** The ORDER BY: nearest first when $distance is set, else by the sorted column. */
+function dbv_order(DbvDriver $d, array $t, mixed $sort, ?string $distance = null): string
 {
     $parts = [];
 
-    if (is_array($sort) && isset($sort['col'])) {
+    if ($distance !== null) {
+        $parts[] = $d->orderBy($distance, 'asc');
+    } elseif (is_array($sort) && isset($sort['col'])) {
         $column = dbv_column($t, (string) $sort['col']);
         $c = $d->col($column['name']);
         $parts[] = $d->orderBy($d->comparable($column) ? $c : $d->asText($c), ($sort['dir'] ?? 'asc') === 'desc' ? 'desc' : 'asc');
@@ -254,22 +296,27 @@ function dbv_action_rows(DbvDriver $d, array $t, array $req): array
     $perPage = max(1, min(1000, (int) ($req['perPage'] ?? 50)));
     $page = max(1, (int) ($req['page'] ?? 1));
     [$where, $params] = dbv_where($d, $t, $req);
+    $near = dbv_near($d, $t, $req['near'] ?? null);
 
     $count = $d->pdo->prepare('select count(*) from '.$d->from($t).$where);
     $count->execute($params);
 
-    $rows = $d->pdo->prepare('select '.dbv_text_columns($d, $t).' from '.$d->from($t).$where.dbv_order($d, $t, $req['sort'] ?? null)
+    // With a nearest-rows search, each row's distance comes last, after its
+    // columns. The ORDER BY names it, so it is worked out once per row.
+    $rows = $d->pdo->prepare('select '.dbv_text_columns($d, $t).($near === null ? '' : ", {$near[0]} as dbv_distance")
+        .' from '.$d->from($t).$where.dbv_order($d, $t, $req['sort'] ?? null, $near === null ? null : 'dbv_distance')
         ." limit {$perPage} offset ".(($page - 1) * $perPage));
-    $rows->execute($params);
+    $rows->execute($near === null ? $params : [...$near[1], ...$params]);
+    $rows = $rows->fetchAll(PDO::FETCH_NUM);
 
     return [
         'table' => dbv_public_meta($t),
-        'rows' => $rows->fetchAll(PDO::FETCH_NUM),
+        'rows' => $near === null ? $rows : array_map(fn ($row) => array_slice($row, 0, -1), $rows),
         'total' => (int) $count->fetchColumn(),
         'page' => $page,
         'perPage' => $perPage,
         'ms' => (int) round((hrtime(true) - $started) / 1e6),
-    ];
+    ] + ($near === null ? [] : ['distances' => array_column($rows, count($t['columns']))]);
 }
 
 /** How many rows in other tables point at this one, per foreign key. */
@@ -480,10 +527,11 @@ function dbv_action_export(DbvDriver $d, array $t, array $req): never
     }
 
     [$where, $params] = dbv_where($d, $t, $req);
+    $near = dbv_near($d, $t, $req['near'] ?? null);
 
     $statement = $d->pdo->prepare('select '.dbv_text_columns($d, $t, $names).' from '.$d->from($t).$where
-        .dbv_order($d, $t, $req['sort'] ?? null).' limit '.(int) dbv_config('export_row_limit'));
-    $statement->execute($params);
+        .dbv_order($d, $t, $req['sort'] ?? null, $near === null ? null : $near[0]).' limit '.(int) dbv_config('export_row_limit'));
+    $statement->execute($near === null ? $params : [...$params, ...$near[1]]);
 
     if ($format === 'json') {
         header('Content-Type: application/json; charset=utf-8');

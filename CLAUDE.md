@@ -19,6 +19,8 @@ node --check <file.js>               # syntax check one JS file
 The API tests only run for servers named in `TEST_PGSQL_*` / `TEST_MYSQL_*` (environment
 or `tests/.env`). Without them the run prints "skipped" and still says "All passed". That is
 not a pass for a change to `src/` or `api.php`: say plainly that the API tests did not run.
+The same goes for `skip [pgsql] pgvector tests`: the vector tests need a PostgreSQL server
+with pgvector available, such as the `pgvector/pgvector:pg18` image.
 
 ## Where things are
 
@@ -108,5 +110,6 @@ version:
 ## Git
 
 Work on a branch when asked to commit; `main` is the default branch. CI runs both suites on
-PHP 8.1 + PostgreSQL 12 + MySQL 8.0 and PHP 8.4 + PostgreSQL 18 + MariaDB 11, so do not use
+PHP 8.1 + PostgreSQL 12 + MySQL 8.0 and PHP 8.4 + PostgreSQL 18 + MariaDB 11 (both PostgreSQL
+servers with pgvector, 0.7.4 on 12), so do not use
 PHP newer than 8.1 or SQL that those versions lack.

@@ -145,14 +145,32 @@
   const short = (s, n = 28) => (s.length > n ? s.slice(0, n) + '...' : s);
   // The server sorts every column type into a category, whatever the
   // database calls it: number, text, bool, date, datetime, time, interval,
-  // json, uuid, binary, array or other.
+  // json, uuid, binary, array, vector or other.
   const isJson = c => c.category === 'json';
   const isBool = c => c.category === 'bool';
-  const monoType = c => ['uuid', 'json', 'binary', 'date', 'datetime', 'time'].includes(c.category);
+  const isVector = c => c.category === 'vector';
+  const monoType = c => ['uuid', 'json', 'binary', 'vector', 'date', 'datetime', 'time'].includes(c.category);
 
   function prettyJson(v) {
     try { return JSON.stringify(JSON.parse(v), null, 2); } catch { return v; }
   }
+
+  // An embedding has hundreds of numbers, so a cell shows the first few and
+  // how many more there are. The row panel shows all of them. A sparsevec is
+  // written {1:0.5,3:0.2}/5, the other vectors [0.5,0.2,0.1].
+  function vectorPreview(v) {
+    const end = v.startsWith('{') ? v.lastIndexOf('}') : v.length - 1;
+    const items = v.slice(1, end).split(',');
+    if (items.length <= 6) return v;
+    return `${v[0]}${items.slice(0, 6).join(',')}, ... ${fmtN(items.length - 6)} more${v.slice(end)}`;
+  }
+
+  // How pgvector measures the nearest rows. The server knows the same three.
+  const METRICS = [
+    ['l2', 'L2', 'Straight-line distance'],
+    ['cosine', 'Cosine', 'The angle between the vectors, whatever their length'],
+    ['ip', 'Inner product', 'The inner product, negated, so the largest comes first'],
+  ];
 
   // Dates and times get a picker. The database writes "2026-09-26 13:36:05.91+00";
   // flatpickr shows "2026-09-26 13:36:05", and the browser's own picker, used
@@ -571,6 +589,9 @@
     page: 1,
     perPage: store.get('perPage', 50),
     sort: null,
+    // Rows nearest to a vector, which orders them instead of the sort:
+    // { col, metric, to } for a vector typed in, { col, metric, key } for a row's own.
+    near: null,
     search: '',
     filters: [],
     data: null,
@@ -611,7 +632,7 @@
     return i < 0 ? { schema: homeSchema(), name: key } : { schema: key.slice(0, i), name: key.slice(i + 1) };
   }
 
-  const fresh = { page: 1, sort: null, search: '', filters: [], focus: null };
+  const fresh = { page: 1, sort: null, near: null, search: '', filters: [], focus: null };
 
   function stateToHash(s) {
     const p = new URLSearchParams();
@@ -620,6 +641,7 @@
     if (s.tab && s.tab !== (s.table ? 'data' : 'overview')) p.set('tab', s.tab);
     if (s.page > 1) p.set('p', s.page);
     if (s.sort) p.set('s', `${s.sort.col}:${s.sort.dir}`);
+    if (s.near) p.set('n', JSON.stringify(s.near));
     if (s.search) p.set('q', s.search);
     if (s.filters && s.filters.length) p.set('f', JSON.stringify(s.filters));
     if (s.tab === 'diagram' && s.focus) p.set('focus', s.focus);
@@ -633,6 +655,11 @@
       filters = JSON.parse(p.get('f') || '[]');
       if (!Array.isArray(filters)) filters = [];
     } catch { filters = []; }
+    let near = null;
+    try {
+      near = JSON.parse(p.get('n') || 'null');
+      if (!near || typeof near.col !== 'string') near = null;
+    } catch { near = null; }
     let sort = null;
     const s = p.get('s');
     if (s && s.includes(':')) {
@@ -645,6 +672,7 @@
       tab: p.get('tab'),
       page: Math.max(1, parseInt(p.get('p') || '1', 10) || 1),
       sort,
+      near,
       search: p.get('q') || '',
       filters: filters.filter(f => f && typeof f.col === 'string'),
       focus: p.get('focus'),
@@ -729,7 +757,7 @@
     S.tab = table
       ? (['data', 'structure', 'sql'].includes(st.tab) ? st.tab : 'data')
       : (['diagram', 'sql', 'health', 'activity'].includes(st.tab) ? st.tab : 'overview');
-    Object.assign(S, { page: st.page, sort: st.sort, search: st.search, filters: st.filters, focus: st.focus });
+    Object.assign(S, { page: st.page, sort: st.sort, near: st.near, search: st.search, filters: st.filters, focus: st.focus });
 
     syncHash(true);
     renderShell();
@@ -1825,7 +1853,7 @@
     forceCloseDrawer();
     try {
       const res = await api('rows', {
-        db: S.db, table, page: S.page, perPage: S.perPage, sort: S.sort, search: S.search, filters: S.filters,
+        db: S.db, table, page: S.page, perPage: S.perPage, sort: S.sort, near: S.near, search: S.search, filters: S.filters,
       });
       if (seq !== rowsSeq) return;
       S.data = res;
@@ -1879,8 +1907,14 @@
       start: (page - 1) * perPage,
       pk: new Set(meta.pk),
       fk: fkMap(meta),
-      sort: S.sort,
-      onSort: col => refine({ sort: nextSort(col), page: 1 }),
+      sort: S.near ? null : S.sort,
+      onSort: col => refine({ sort: nextSort(col), near: null, page: 1 }),
+      extra: S.near && S.data.distances ? {
+        label: 'distance',
+        type: (METRICS.find(m => m[0] === S.near.metric) || [])[1] || S.near.metric,
+        title: `How far each row's ${S.near.col} is from the vector it is measured from`,
+        values: S.data.distances,
+      } : null,
       highlight: S.search,
       widthsKey: `widths:${S.db}:${tableKey(S.table)}`,
       selectable: true,
@@ -1908,7 +1942,7 @@
   }
 
   function nextSort(col) {
-    const s = S.sort;
+    const s = S.near ? null : S.sort;
     if (!s || s.col !== col) return { col, dir: 'asc' };
     return s.dir === 'asc' ? { col, dir: 'desc' } : null;
   }
@@ -1987,7 +2021,7 @@
     const cols = S.data && sameTable(S.data.table, S.table) ? S.data.table.columns : S.filters.map(f => ({ name: f.col }));
     const apply = () => refine({ page: 1 });
 
-    put(UI.filterBar, S.filters.map(f => {
+    put(UI.filterBar, nearChip(), S.filters.map(f => {
       const colSelect = searchable(h('select', { class: 'input', onchange: e => { f.col = e.target.value; renderFilters(); apply(); } },
         [...new Set(cols.map(c => c.name))].map(name => h('option', { value: name }, name))));
       colSelect.value = f.col;
@@ -2005,6 +2039,67 @@
     }), S.filters.length > 1
       ? h('button', { class: 'btn ghost small', onclick: () => { S.filters = []; renderFilters(); apply(); } }, 'Clear all')
       : null);
+  }
+
+  // While the rows are ordered by distance, a chip says to what, and lets the
+  // measure change or the order go back to normal.
+  function nearChip() {
+    const n = S.near;
+    if (!n) return null;
+    const from = n.key ? `row ${Object.values(n.key).join(' / ')}` : 'your vector';
+    return h('div', { class: 'filter', title: n.to ? vectorPreview(n.to) : null },
+      h('span', { class: 'filter-text' }, `Nearest to ${from} in ${n.col}`),
+      segmented(METRICS, n.metric, v => refine({ near: { ...n, metric: v }, page: 1 })),
+      h('button', { class: 'btn ghost icon-only tiny', title: 'Stop sorting by distance', onclick: () => setNear(null) }, icon('x')));
+  }
+
+  // Orders the rows by distance, or with null as before. The chip changes
+  // straight away, so it is right even when the rows then fail to load.
+  function setNear(near) {
+    S.near = near;
+    if (near) S.sort = null;
+    renderFilters();
+    refine({ page: 1 });
+  }
+
+  // Orders the rows by how near their vector in col is to this row's.
+  function nearRow(col, row) {
+    const meta = S.data.table;
+    const from = meta.pk.length ? { key: keyOf(meta, row) } : { to: row[meta.columns.findIndex(c => c.name === col)] };
+    setNear({ col, metric: (S.near && S.near.metric) || 'cosine', ...from });
+  }
+
+  // Orders the rows by how near their vector in c is to one typed in.
+  function askVector(c) {
+    let metric = (S.near && S.near.metric) || 'cosine';
+    const input = h('textarea', {
+      class: 'input mono', rows: 4, spellcheck: false,
+      placeholder: c.type.startsWith('sparsevec') ? '{1:0.5,3:0.2}/5' : '[0.1, 0.2, 0.3]',
+      value: S.near && S.near.col === c.name && S.near.to ? S.near.to : '',
+    });
+    const form = h('form', {
+      class: 'form-stack',
+      onsubmit: e => {
+        e.preventDefault();
+        const to = input.value.trim();
+        if (!to) return;
+        modal.close();
+        setNear({ col: c.name, metric, to });
+      },
+    },
+    h('label', null, `Vector to compare with ${c.name} (${c.type})`, input),
+    h('div', { class: 'form-stack tight' },
+      h('span', { class: 'field-label' }, 'Measure by'),
+      segmented(METRICS, metric, v => { metric = v; })));
+    const modal = openModal({
+      title: 'Sort by distance to a vector',
+      body: form,
+      actions: [
+        h('button', { class: 'btn', onclick: () => modal.close() }, 'Cancel'),
+        h('button', { class: 'btn primary', onclick: () => form.requestSubmit() }, 'Sort by distance'),
+      ],
+    });
+    input.focus();
   }
 
   // The value box of a filter: a list for a column with allowed values, a
@@ -2077,7 +2172,7 @@
     const hidden = hiddenCols();
     try {
       const res = await api('export', {
-        db: S.db, table: S.table, sort: S.sort, search: S.search, filters: S.filters, format,
+        db: S.db, table: S.table, sort: S.sort, near: S.near, search: S.search, filters: S.filters, format,
         columns: meta.columns.map(c => c.name).filter(n => !hidden.has(n)),
       }, true);
       download(`${dbById(S.db).name}-${S.table.name}.${FORMATS[format].ext}`, await res.blob());
@@ -2532,7 +2627,8 @@
     const cols = o.cols;
     const fk = o.fk || new Map();
     const pk = o.pk || new Set();
-    const lead = o.selectable ? 2 : 1;
+    // The cells before the columns: the checkbox, the row number and o.extra.
+    const lead = (o.selectable ? 2 : 1) + (o.extra ? 1 : 0);
     const g = { cols, rows: o.rows, selected: new Set(), active: null, activeTd: null, last: null, trs: [] };
     const widths = o.widthsKey ? store.get(o.widthsKey, {}) : {};
     const style = h('style');
@@ -2609,6 +2705,7 @@
         o.selectable ? h('td', { class: 'pick' }, h('input', { type: 'checkbox', checked: on, tabindex: -1 })) : null,
         h('td', { class: 'rownum' + (o.onOpen ? ' openable' : ''), title: o.onOpen ? withKey('Open this row', 'openRow') : null },
           h('span', { class: 'n' }, (o.start || 0) + ri + 1), o.onOpen ? icon('expand', 'open') : null),
+        o.extra ? extraCell(o.extra.values[ri]) : null,
         cols.map((c, ci) => {
           const v = row[c.i];
           return h('td', {
@@ -2827,10 +2924,19 @@
         h('thead', null, h('tr', null,
           o.selectable ? h('th', { class: 'pick' }, allBox) : null,
           h('th', { class: 'rownum' }, '#'),
+          o.extra ? h('th', { title: o.extra.title },
+            h('div', { class: 'th' }, h('span', { class: 'th-name' }, o.extra.label)),
+            h('div', { class: 'th-type' }, o.extra.type)) : null,
           headers)),
         tbody),
       g.rows.length ? null : h('div', { class: 'empty' }, o.empty || 'No rows.'));
     return g;
+  }
+
+  // A number the grid shows beside the row, such as its distance. It is not a
+  // column of the table, so it cannot be picked or edited.
+  function extraCell(v) {
+    return h('td', { class: 'num mono', title: v }, v == null ? h('span', { class: 'null' }, 'NULL') : Number(v).toFixed(4));
   }
 
   function cellClass(c) {
@@ -2858,7 +2964,7 @@
   function cellView(v, c, fk, highlight) {
     if (v == null) return h('span', { class: 'null' }, 'NULL');
     if (isBool(c)) return h('span', { class: 'bool ' + (v === 'true' ? 'yes' : 'no') }, v);
-    const text = marked(v.length > 300 ? v.slice(0, 300) + '...' : v, highlight);
+    const text = marked(isVector(c) ? vectorPreview(v) : v.length > 300 ? v.slice(0, 300) + '...' : v, highlight);
     if (fk) {
       return h('a', {
         class: 'fk-link',
@@ -2898,7 +3004,7 @@
     const kind = pickerKind(col);
     const fk = fkMap(meta).get(col.name);
     const shown = old == null ? '' : json ? prettyJson(old) : old;
-    const big = !kind && !col.options && !fk && (json || col.category === 'array' || shown.length > 50 || shown.includes('\n'));
+    const big = !kind && !col.options && !fk && (json || col.category === 'array' || isVector(col) || shown.length > 50 || shown.includes('\n'));
     const keep = e => e.preventDefault();
 
     let input;
@@ -3158,6 +3264,7 @@
         ],
       { label: `See every value of ${col.name}`, icon: 'chart', run: () => showValues(col.name) },
       fk && v != null ? { label: `Open the linked ${fk.table} row`, icon: 'arrow', run: () => followFk(fk, v) } : null,
+      isVector(col) && v != null && !many ? { label: 'Find rows like this one', icon: 'search', run: () => nearRow(col.name, row) } : null,
       'sep',
       meta.editable && !many ? { label: 'Edit this cell', icon: 'edit', kbd: keyLabel('edit'), disabled: col.readonly, run: () => editCell(ri, ci) } : null,
       meta.editable && !many && col.nullable && !col.readonly && v != null
@@ -3171,12 +3278,14 @@
   }
 
   function headerMenu(e, c) {
-    const dir = S.sort && S.sort.col === c.name ? S.sort.dir : null;
+    const dir = S.sort && S.sort.col === c.name && !S.near ? S.sort.dir : null;
     openMenuAt(e, [
       { title: `${c.name}  ${c.type}` },
-      { label: 'Sort A to Z, low to high', icon: 'up', disabled: dir === 'asc', run: () => refine({ sort: { col: c.name, dir: 'asc' }, page: 1 }) },
-      { label: 'Sort Z to A, high to low', icon: 'down', disabled: dir === 'desc', run: () => refine({ sort: { col: c.name, dir: 'desc' }, page: 1 }) },
+      { label: 'Sort A to Z, low to high', icon: 'up', disabled: dir === 'asc', run: () => refine({ sort: { col: c.name, dir: 'asc' }, near: null, page: 1 }) },
+      { label: 'Sort Z to A, high to low', icon: 'down', disabled: dir === 'desc', run: () => refine({ sort: { col: c.name, dir: 'desc' }, near: null, page: 1 }) },
       dir ? { label: 'Clear the sort', icon: 'x', run: () => refine({ sort: null, page: 1 }) } : null,
+      isVector(c) ? { label: 'Sort by distance to a vector', icon: 'search', run: () => askVector(c) } : null,
+      S.near && S.near.col === c.name ? { label: 'Stop sorting by distance', icon: 'x', run: () => setNear(null) } : null,
       'sep',
       { label: `Filter by ${c.name}`, icon: 'filter', run: () => addFilter(c.name) },
       { label: `See every value of ${c.name}`, icon: 'chart', run: () => showValues(c.name) },
@@ -3274,11 +3383,11 @@
         ] : null,
         h('button', { class: 'btn', onclick: () => copyText(JSON.stringify(obj, null, 2), 'Row copied as JSON.') }, icon('copy'), 'Copy JSON')),
       h('div', { class: 'drawer-body' },
-        meta.columns.map((c, i) => fieldView(c, row[i], pk.has(c.name), fk.get(c.name))),
+        meta.columns.map((c, i) => fieldView(c, row[i], pk.has(c.name), fk.get(c.name), d.source === 'table' ? () => nearRow(c.name, row) : null)),
         d.source === 'table' && meta.refs && meta.refs.length ? refsSection(d, obj) : null));
   }
 
-  function fieldView(c, v, isPk, fk) {
+  function fieldView(c, v, isPk, fk, near) {
     let body;
     if (v == null) body = h('span', { class: 'null' }, 'NULL');
     else if (isJson(c)) body = h('pre', { class: 'code' }, prettyJson(v));
@@ -3295,6 +3404,9 @@
       body,
       fk && v != null
         ? h('a', { class: 'fk-open', href: stateToHash(fkTarget(fk, v)), onclick: e => { e.preventDefault(); followFk(fk, v); } }, icon('arrow'), `Open in ${fk.table}`)
+        : null,
+      isVector(c) && v != null && near
+        ? h('a', { class: 'fk-open', href: '#', onclick: e => { e.preventDefault(); near(); } }, icon('search'), 'Find rows like this one')
         : null,
       c.comment ? h('div', { class: 'field-note' }, c.comment) : null);
   }
@@ -3409,7 +3521,7 @@
         input = box.input;
         extra = h('button', { class: 'btn ghost small', type: 'button', onclick: () => box.set(nowFor(kind)) },
           icon('calendar'), kind === 'date' ? 'Today' : 'Now (UTC)');
-      } else if (isJson(c) || c.category === 'array' || (c.category === 'text' && (shown.length > 60 || shown.includes('\n')))) {
+      } else if (isJson(c) || c.category === 'array' || isVector(c) || (c.category === 'text' && (shown.length > 60 || shown.includes('\n')))) {
         input = h('textarea', {
           class: 'input' + (monoType(c) ? ' mono' : ''),
           rows: Math.min(14, Math.max(2, shown.split('\n').length)),
@@ -3687,6 +3799,8 @@
       'date', 'timestamp', 'timestamptz', 'time', 'interval', 'uuid', 'jsonb', 'json', 'bytea', 'text[]', 'integer[]'],
     mysql: ['int', 'bigint', 'smallint', 'tinyint(1)', 'decimal(10,2)', 'double', 'varchar(255)', 'char(36)', 'text', 'mediumtext', 'longtext',
       'date', 'datetime', 'timestamp', 'time', 'json', 'blob', "enum('a','b')"],
+    // Offered once the vector extension is in the database.
+    pgvector: ['vector(1536)', 'halfvec(1536)', 'sparsevec(1536)'],
   };
 
   // Adds a column to t, or changes c. The SQL it would run shows as you type,
@@ -3705,7 +3819,7 @@
     const name = h('input', { class: 'input mono', value: c ? c.name : '', maxlength: 63, spellcheck: false, placeholder: 'column_name', oninput: () => changed() });
     // The whole list opens on focus and filters as you type. A type not in it,
     // such as varchar(80) or an enum type, is taken as typed.
-    const types = [...new Set([...(c ? [c.type] : []), ...COLUMN_TYPES[isMysql() ? 'mysql' : 'pgsql']])];
+    const types = [...new Set([...(c ? [c.type] : []), ...COLUMN_TYPES[isMysql() ? 'mysql' : 'pgsql'], ...(S.info && S.info.vector ? COLUMN_TYPES.pgvector : [])])];
     const type = searchable(h('select', { class: 'input mono', onchange: () => changed() },
       c ? null : h('option', { value: '' }, 'Pick or type a type'),
       types.map(x => h('option', { value: x, selected: c && x === c.type }, x))),

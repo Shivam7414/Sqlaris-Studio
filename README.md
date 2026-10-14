@@ -71,6 +71,11 @@ wrong database by accident.
 - Select many rows to copy them, set one value on all of them, or delete them.
 - Open a row to see every field with its type and comment, follow its foreign keys, and
   count the rows in other tables that point to it.
+- pgvector columns (`vector`, `halfvec`, `sparsevec`) show their first few numbers in the
+  grid and every number in the row panel. Find the rows nearest to a row's vector, or to
+  one you paste in, by L2, cosine or inner product, with the distance beside each row.
+  Filters, search, paging and export keep to that order. Every row is measured, so the
+  answer is exact even where an HNSW or IVFFlat index would stop early.
 
 | Editing an enum column | Row details |
 | --- | --- |
@@ -137,7 +142,8 @@ want the whole script kept or undone together.
 | ![Findings about missing indexes and primary keys](docs/screenshots/health.png) | ![Charts of connections, queries, rows and cache hits](docs/screenshots/activity.png) |
 
 - A health tab that flags dead rows, foreign keys without an index, unused indexes, tables
-  without a primary key and free space on MySQL, with the SQL to fix each one.
+  without a primary key, big tables whose vector column has no HNSW or IVFFlat index, and
+  free space on MySQL, with the SQL to fix each one.
 - Live charts of connections, queries, rows and cache hits, plus the open sessions, with
   buttons to cancel a query or end a session.
 
@@ -288,6 +294,8 @@ Everything works on both systems, with a few differences:
   enum value, for example) is rejected instead of silently changed.
 - `tinyint(1)` is shown as true or false. Binary and spatial columns are shown but cannot
   be edited.
+- Vector columns and the nearest-rows search are for PostgreSQL with pgvector only. A
+  `VECTOR` column on MySQL 9 or MariaDB 11.7 shows like any other column.
 - When a new row's key comes from a DEFAULT expression such as `uuid()`, MySQL cannot say
   which row was created, so the form closes and the row shows up in the list.
 - Changing a column rewrites its whole definition. The viewer keeps its collation,
@@ -408,9 +416,12 @@ TEST_MYSQL_PASSWORD=secret
 Each run makes a database called `sqlaris_test`, fills it, and drops it at the end. The
 tests of making and dropping a database also use `sqlaris_test_extra`. Use a server where
 both names are free. Every action in `api.php` must work in at least one test, or the run
-fails and names it. GitHub Actions runs both suites on every push, with
+fails and names it. The vector tests need a PostgreSQL server with pgvector available,
+such as the `pgvector/pgvector` image. On a server without it they are skipped, and the
+run prints a line that says so. GitHub Actions runs both suites on every push, with
 PHP 8.1 and PostgreSQL 12 and MySQL 8.0, and with PHP 8.4 and PostgreSQL 18 and
-MariaDB 11. It also builds the image and signs in to the demo.
+MariaDB 11, both PostgreSQL servers with pgvector. It also builds the image and signs in
+to the demo.
 
 There are also browser tests, which sign in, open a table, change a value and delete a
 row in a real Chromium. They use Playwright, which only these tests need, and the same

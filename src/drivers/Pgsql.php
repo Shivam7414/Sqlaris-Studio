@@ -28,6 +28,12 @@ final class DbvPgsql extends DbvDriver
 
     public const SYSTEM_DATABASES = ['postgres', 'template0', 'template1'];
 
+    /** pgvector's types. Each takes the same three distance operators. */
+    private const VECTOR_TYPES = ['vector', 'halfvec', 'sparsevec'];
+
+    /** pgvector's operator for each way of measuring. ip gives the inner product negated, so smaller is nearer for all three. */
+    private const DISTANCES = ['l2' => '<->', 'cosine' => '<=>', 'ip' => '<#>'];
+
     public static function connect(array $server, ?string $database): PDO
     {
         // PostgreSQL always connects to one database, so the list is read from this one.
@@ -101,7 +107,8 @@ final class DbvPgsql extends DbvDriver
             }
         }
 
-        $info = dbv_one($this->pdo, "select pg_database_size(current_database()) as size, current_setting('server_version') as version");
+        $info = dbv_one($this->pdo, "select pg_database_size(current_database()) as size, current_setting('server_version') as version,
+            exists (select 1 from pg_extension where extname = 'vector') as vector");
 
         return [
             'tables' => array_map(fn (array $t) => [
@@ -113,7 +120,7 @@ final class DbvPgsql extends DbvDriver
                 'bytes' => (int) $t['bytes'],
                 'comment' => $t['comment'],
             ], $tables),
-            'info' => ['size' => (int) $info['size'], 'version' => 'PostgreSQL '.$info['version'], 'schema' => 'public'],
+            'info' => ['size' => (int) $info['size'], 'version' => 'PostgreSQL '.$info['version'], 'schema' => 'public', 'vector' => (bool) $info['vector']],
         ];
     }
 
@@ -133,7 +140,7 @@ final class DbvPgsql extends DbvDriver
         $columns = [];
 
         foreach (dbv_all($this->pdo,
-            'select a.attname as name, format_type(a.atttypid, a.atttypmod) as type, t.typcategory as category,
+            'select a.attname as name, format_type(a.atttypid, a.atttypmod) as type, t.typcategory as category, t.typname,
                 a.attnotnull as not_null, pg_get_expr(d.adbin, d.adrelid) as default_value,
                 a.attidentity as identity, a.attgenerated as generated, col_description(a.attrelid, a.attnum) as comment,
                 (select json_agg(e.enumlabel order by e.enumsortorder) from pg_enum e where e.enumtypid = t.oid) as enum_values
@@ -145,7 +152,7 @@ final class DbvPgsql extends DbvDriver
             $columns[$column['name']] = [
                 'name' => $column['name'],
                 'type' => $column['type'],
-                'category' => $this->category($column['category'], $column['type']),
+                'category' => $this->category($column['category'], $column['type'], $column['typname']),
                 'nullable' => ! $column['not_null'],
                 'default' => $column['default_value'],
                 'default_sql' => $column['default_value'],
@@ -211,9 +218,10 @@ final class DbvPgsql extends DbvDriver
         ];
     }
 
-    private function category(string $typcategory, string $type): string
+    private function category(string $typcategory, string $type, string $typname): string
     {
         return match (true) {
+            in_array($typname, self::VECTOR_TYPES, true) => 'vector',
             $typcategory === 'B' => 'bool',
             $typcategory === 'N' => 'number',
             $typcategory === 'S', $typcategory === 'E' => 'text',
@@ -375,6 +383,26 @@ final class DbvPgsql extends DbvDriver
     public function comparable(array $column): bool
     {
         return ! in_array($column['type'], ['json', 'xml', 'point', 'polygon', 'circle', 'box', 'line', 'lseg', 'path'], true);
+    }
+
+    public function distance(string $expr, string $metric, string $to): string
+    {
+        $operator = self::DISTANCES[$metric] ?? throw new DbvError('Measure by L2, cosine or inner product.');
+
+        // An HNSW or IVFFlat index stops after a set number of rows (40 by
+        // default for HNSW), so a page or a filter could come back short.
+        // The + 0 keeps the planner off the index, and every row is measured.
+        return "(({$expr} operator({$this->vectorSchema()}.{$operator}) {$to}) + 0)";
+    }
+
+    /**
+     * The schema pgvector was put in, quoted. A host may keep extensions in a
+     * schema that is not on the search path, where a bare <=> is not found.
+     */
+    private function vectorSchema(): string
+    {
+        return $this->quote((string) dbv_one($this->pdo,
+            "select n.nspname from pg_extension e join pg_namespace n on n.oid = e.extnamespace where e.extname = 'vector'")['nspname']);
     }
 
     /** The value goes in as text and PostgreSQL casts it, so it checks the value the usual way. */
@@ -631,6 +659,34 @@ final class DbvPgsql extends DbvDriver
                 "{$ix['name']} on ".$this->label($ix['schema'], $ix['tbl']),
                 'The table is read often, but never through this index. It still costs space and time on every write.', null,
                 'drop index '.$this->quote($ix['schema']).'.'.$this->quote($ix['name']).';');
+        }
+
+        // A big table whose vector column no HNSW or IVFFlat index uses, read
+        // from pg_depend because an index on an expression of the column counts
+        // too. A column with no fixed size cannot have such an index at all.
+        foreach (dbv_all($this->pdo,
+            "select n.nspname as schema, c.relname as tbl, a.attname as col, t.typname as type, a.atttypmod as size
+            from pg_attribute a
+            join pg_type t on t.oid = a.atttypid
+            join pg_class c on c.oid = a.attrelid join pg_namespace n on n.oid = c.relnamespace
+            where t.typname in ('vector', 'halfvec', 'sparsevec') and a.attnum > 0 and not a.attisdropped and a.atttypmod > 0
+              and c.relkind in ('r', 'p', 'm') and c.reltuples >= 10000 and not c.relispartition
+              and n.nspname not in ('pg_catalog', 'information_schema') and n.nspname not like 'pg\\_%'
+              and not exists (select 1 from pg_depend dep
+                  join pg_class ic on ic.oid = dep.objid join pg_am am on am.oid = ic.relam
+                  where dep.classid = 'pg_class'::regclass and dep.refclassid = 'pg_class'::regclass
+                    and dep.refobjid = c.oid and dep.refobjsubid = a.attnum and am.amname in ('hnsw', 'ivfflat'))
+            order by n.nspname, c.relname, a.attnum") as $v) {
+            // HNSW takes up to 2000 numbers in a vector and 4000 in a halfvec.
+            $fits = ['vector' => 2000, 'halfvec' => 4000][$v['type']] ?? PHP_INT_MAX;
+            $findings[] = $this->finding('Vector columns without an index', 'info', $v['schema'], $v['tbl'],
+                $this->label($v['schema'], $v['tbl'])." ({$v['col']})",
+                "Each search for the rows nearest to a vector reads the whole table. An HNSW index answers it quickly. The SQL measures by cosine; use {$v['type']}_l2_ops or {$v['type']}_ip_ops if your app measures by L2 or inner product."
+                .((int) $v['size'] > $fits ? " HNSW takes at most {$fits} numbers in a {$v['type']}, so there is no SQL here. The pgvector README shows how to index a longer one." : ''),
+                null,
+                (int) $v['size'] > $fits ? null
+                    : 'create index on '.$this->quote($v['schema']).'.'.$this->quote($v['tbl']).' using hnsw ('.$this->quote($v['col'])
+                        ." {$this->vectorSchema()}.{$v['type']}_cosine_ops);");
         }
 
         $db = dbv_one($this->pdo,

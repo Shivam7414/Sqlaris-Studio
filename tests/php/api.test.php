@@ -796,6 +796,458 @@ function api_tests(string $tag, string $driver, TestClient $c, string $db, PDO $
         same('1', (string) $elsewhere->query('select 1')->fetchColumn(), 'the session in the other database is still there');
     });
 
+    // Vectors. The pgvector tests need a server that can create the extension. On any other server none of them is
+    // added, so the run cannot print "ok" for a test that did not run. The table is made here and stays: the tests
+    // that change it put it back, and the database is dropped after the run. Row 5 has no vector at all.
+
+    $vector = $driver === 'pgsql' && (int) $pdo->query("select count(*) from pg_available_extensions where name = 'vector'")->fetchColumn() > 0;
+
+    if ($driver === 'pgsql' && ! $vector) {
+        echo "  skip {$tag} pgvector tests: this server has no vector extension\n";
+    }
+
+    if ($vector) {
+        $pdo->exec('create extension if not exists vector');
+        $pdo->exec('create table docs (id integer primary key, title text not null, embedding vector(3), half halfvec(3), sparse sparsevec(5), loose vector)');
+        $pdo->exec("insert into docs values
+            (1, 'one', '[1,0,0]', '[1,0,0]', '{1:1}/5', '[1,2]'),
+            (2, 'two', '[0,1,0]', '[0,1,0]', '{2:1}/5', null),
+            (3, 'three', '[0.9,0.1,0]', '[0.9,0.1,0]', '{1:0.9,2:0.1}/5', null),
+            (4, 'four', '[-1,0,0]', '[-1,0,0]', '{1:-1}/5', null),
+            (5, 'five', null, null, null, null),
+            (6, 'six', '[2,0,0]', '[2,0,0]', '{1:2}/5', null)");
+
+        $docs = ['db' => $db, 'table' => ['name' => 'docs']];
+        $vectorText = fn (int $id, string $column = 'embedding') => $pdo->query("select {$column}::text from docs where id = {$id}")->fetchColumn();
+        $nearAnswer = fn (array $near, array $extra = []) => $c->ok('rows', $docs + ['near' => $near] + $extra);
+        $nearTo = fn (string $col, string $metric, string $to, array $extra = []) => $nearAnswer(['col' => $col, 'metric' => $metric, 'to' => $to], $extra);
+        $nearRefused = fn (array $near, string $part = '') => $c->refused('rows', $docs + ['near' => $near], $part);
+        $idsOf = function (array $answer): array {
+            $at = array_search('id', array_column($answer['table']['columns'], 'name'), true);
+
+            return array_map(fn ($row) => (int) $row[$at], $answer['rows']);
+        };
+        // The ids in the order the rows came, and the distances beside them. A distance is a number written as text, so
+        // it is compared with a tolerance; null stands for a row with no vector.
+        $assertNear = function (array $answer, array $ids, array $distances, float $tolerance = 0.0001) use ($idsOf): void {
+            same($ids, $idsOf($answer), 'the rows are in the order of their distance');
+            check(isset($answer['distances']) && is_array($answer['distances']), 'the answer has no list of distances');
+            same(count($answer['rows']), count($answer['distances']), 'one distance for each row');
+
+            foreach ($distances as $i => $want) {
+                $got = $answer['distances'][$i];
+
+                if ($want === null) {
+                    same(null, $got, "row {$ids[$i]} has no vector, so no distance");
+
+                    continue;
+                }
+
+                check(is_numeric($got), "the distance of row {$ids[$i]} is not a number: ".var_export($got, true));
+                check(abs((float) $got - $want) <= $tolerance, "the distance of row {$ids[$i]} should be about {$want}, but is {$got}");
+            }
+        };
+
+        test("{$tag} vector columns are told apart from the other columns", function () use ($c, $docs) {
+            foreach (['structure', 'rows'] as $action) {
+                $categories = array_column($c->ok($action, $docs)['table']['columns'], 'category', 'name');
+
+                foreach (['embedding', 'half', 'sparse', 'loose'] as $name) {
+                    same('vector', $categories[$name] ?? null, "{$name} in the answer to {$action}");
+                }
+
+                foreach (['id', 'title'] as $name) {
+                    check(($categories[$name] ?? 'vector') !== 'vector', "{$name} is not a vector, in the answer to {$action}");
+                }
+            }
+        });
+
+        test("{$tag} the table list says whether the vector extension is in the database", function () use ($c, $db, $connect) {
+            same(true, $c->ok('tables', ['db' => $db])['info']['vector'] ?? null, 'the test database has the extension');
+
+            $extra = explode('/', $db, 2)[0].'/'.TEST_EXTRA_DATABASE;
+            $c->ok('create_database', ['db' => $db, 'name' => TEST_EXTRA_DATABASE]);
+
+            try {
+                // A new database starts as a copy of template1, which may have the extension on a server where someone put it.
+                $other = $connect(TEST_EXTRA_DATABASE);
+                $other->exec('drop extension if exists vector');
+                $other = null;
+
+                $info = $c->ok('tables', ['db' => $extra])['info'];
+                same(false, $info['vector'] ?? false, 'a database without the extension is not marked: '.json_encode($info));
+            } finally {
+                $c->ok('drop_database', ['db' => $extra, 'confirm' => TEST_EXTRA_DATABASE]);
+            }
+        });
+
+        // Nearest rows
+
+        test("{$tag} rows near a vector come closest first by L2 distance, with a row that has no vector last", function () use ($nearTo, $assertNear) {
+            $answer = $nearTo('embedding', 'l2', '[1,0,0]');
+
+            same(6, $answer['total']);
+            $assertNear($answer, [1, 3, 6, 2, 4, 5], [0, 0.141421, 1, 1.414214, 2, null]);
+        });
+
+        test("{$tag} rows near a vector can be ordered by cosine distance, and rows that tie by their key", function () use ($nearTo, $assertNear) {
+            // Rows 1 and 6 point the same way, so both are at distance 0 and the key puts 1 first.
+            $assertNear($nearTo('embedding', 'cosine', '[1,0,0]'), [1, 6, 3, 2, 4, 5], [0, 0, 0.006116, 1, 2, null]);
+        });
+
+        test("{$tag} rows near a vector can be ordered by inner product, the biggest product first", function () use ($nearTo, $assertNear) {
+            // The distance is the negative inner product, so the longest vector in the same direction is the nearest.
+            $assertNear($nearTo('embedding', 'ip', '[1,0,0]'), [6, 1, 3, 2, 4, 5], [-2, -1, -0.9, 0, 1, null]);
+        });
+
+        test("{$tag} a sort sent with a nearest request is ignored", function () use ($nearTo, $assertNear) {
+            $answer = $nearTo('embedding', 'l2', '[1,0,0]', ['sort' => ['col' => 'title', 'dir' => 'desc']]);
+
+            $assertNear($answer, [1, 3, 6, 2, 4, 5], [0, 0.141421, 1, 1.414214, 2, null]);
+        });
+
+        test("{$tag} rows near another row are measured from that row's vector in the same column", function () use ($nearAnswer, $assertNear) {
+            $answer = $nearAnswer(['col' => 'embedding', 'metric' => 'l2', 'key' => ['id' => '3']]);
+
+            $assertNear($answer, [3, 1, 6, 2, 4, 5], [0, 0.141421, 1.104536, 1.272792, 1.90263, null]);
+        });
+
+        test("{$tag} a nearest request keeps to the filters and the search, and counts only the rows they leave", function () use ($nearTo, $assertNear) {
+            $filter = [['col' => 'id', 'op' => 'gt', 'value' => '1']];
+
+            $filtered = $nearTo('embedding', 'l2', '[1,0,0]', ['filters' => $filter]);
+            same(5, $filtered['total']);
+            $assertNear($filtered, [3, 6, 2, 4, 5], [0.141421, 1, 1.414214, 2, null]);
+
+            // "o" is in one, two and four, and nowhere else in the rows.
+            $searched = $nearTo('embedding', 'l2', '[1,0,0]', ['search' => 'o']);
+            same(3, $searched['total']);
+            $assertNear($searched, [1, 2, 4], [0, 1.414214, 2]);
+
+            $both = $nearTo('embedding', 'l2', '[1,0,0]', ['filters' => $filter, 'search' => 'o']);
+            same(2, $both['total']);
+            $assertNear($both, [2, 4], [1.414214, 2]);
+        });
+
+        test("{$tag} the next page of a nearest request holds the next rows in distance order", function () use ($nearTo, $assertNear) {
+            $first = $nearTo('embedding', 'l2', '[1,0,0]', ['perPage' => 2, 'page' => 1]);
+            $second = $nearTo('embedding', 'l2', '[1,0,0]', ['perPage' => 2, 'page' => 2]);
+            $third = $nearTo('embedding', 'l2', '[1,0,0]', ['perPage' => 2, 'page' => 3]);
+
+            same([6, 2], [$second['total'], $second['page']], 'the total is every row, and this is page 2');
+            $assertNear($first, [1, 3], [0, 0.141421]);
+            $assertNear($second, [6, 2], [1, 1.414214]);
+            $assertNear($third, [4, 5], [2, null]);
+        });
+
+        test("{$tag} half precision and sparse vector columns are searched the same way", function () use ($nearTo, $assertNear) {
+            // A half precision number carries about three digits, so the distances are close, not exact.
+            $assertNear($nearTo('half', 'l2', '[1,0,0]'), [1, 3, 6, 2, 4, 5], [0, 0.141421, 1, 1.414214, 2, null], 0.01);
+            $assertNear($nearTo('sparse', 'l2', '{1:1}/5'), [1, 3, 6, 2, 4, 5], [0, 0.141421, 1, 1.414214, 2, null]);
+        });
+
+        test("{$tag} a vector column with no fixed size is searched too", function () use ($nearTo, $assertNear) {
+            // Only row 1 has a value in it, so it is the only one with a distance and the rest follow by key.
+            $assertNear($nearTo('loose', 'l2', '[1,2]'), [1, 2, 3, 4, 5, 6], [0, null, null, null, null, null]);
+        });
+
+        // Read through an HNSW index, a search stops after hnsw.ef_search rows, 40 by default, and a page of 100 comes back short.
+        // PostgreSQL 12 has no incremental sort, so with the key after the distance it never reads in index order and passes
+        // anyway. The newer servers are the ones that check this.
+        test("{$tag} a column with an HNSW index still fills the page with the nearest rows", function () use ($c, $db, $pdo, $idsOf) {
+            $pdo->exec('drop table if exists docs_indexed');
+            $pdo->exec('create table docs_indexed (id integer primary key, embedding vector(3))');
+            $pdo->exec("insert into docs_indexed select g, ('[' || g || ',1,1]')::vector from generate_series(1, 20000) g");
+            $pdo->exec('create index on docs_indexed using hnsw (embedding vector_l2_ops)');
+            $pdo->exec('analyze docs_indexed');
+
+            try {
+                $answer = $c->ok('rows', ['db' => $db, 'table' => ['name' => 'docs_indexed'], 'perPage' => 100,
+                    'near' => ['col' => 'embedding', 'metric' => 'l2', 'to' => '[1,1,1]']]);
+                same(range(1, 100), $idsOf($answer), 'the 100 nearest rows, in order');
+            } finally {
+                $pdo->exec('drop table if exists docs_indexed');
+            }
+        });
+
+        test("{$tag} an export near a vector lists the rows closest first", function () use ($c, $docs) {
+            $near = ['col' => 'embedding', 'metric' => 'l2', 'to' => '[1,0,0]'];
+            $ids = function (array $extra) use ($c, $docs, $near): array {
+                $r = $c->api('export', $docs + ['format' => 'json', 'near' => $near] + $extra);
+                same(200, $r['status'], substr($r['body'], 0, 200));
+                $rows = json_decode($r['body'], true);
+                check(is_array($rows), 'the export is not JSON: '.substr($r['body'], 0, 200));
+
+                return array_map('intval', array_column($rows, 'id'));
+            };
+
+            same([1, 3, 6, 2, 4, 5], $ids([]));
+            same([3, 6, 2, 4, 5], $ids(['filters' => [['col' => 'id', 'op' => 'gt', 'value' => '1']]]), 'an export near a vector keeps to the filters');
+        });
+
+        // Nearest rows, refused
+
+        test("{$tag} a nearest request for a column that is not there, or is not a vector, is refused", function () use ($c, $docs, $nearRefused, $count) {
+            foreach (['nope', 'embedding"; drop table docs; --'] as $col) {
+                $nearRefused(['col' => $col, 'metric' => 'l2', 'to' => '[1,0,0]'], 'has no column called');
+            }
+
+            $nearRefused(['metric' => 'l2', 'to' => '[1,0,0]']);
+
+            foreach (['title', 'id'] as $col) {
+                $nearRefused(['col' => $col, 'metric' => 'l2', 'to' => '[1,0,0]'], 'not a vector column');
+            }
+
+            // An export is a way to read the same rows, so it is refused for the same reasons.
+            $c->refused('export', $docs + ['format' => 'json', 'near' => ['col' => 'title', 'metric' => 'l2', 'to' => '[1,0,0]']], 'not a vector column');
+            $c->refused('export', $docs + ['format' => 'json', 'near' => ['col' => 'nope', 'metric' => 'l2', 'to' => '[1,0,0]']], 'has no column called');
+            same(6, $count('docs'));
+        });
+
+        test("{$tag} a metric that is not L2, cosine or inner product is refused", function () use ($nearRefused, $count) {
+            foreach (['l1', 'cosine; drop table docs', '<->', 'hamming'] as $metric) {
+                $nearRefused(['col' => 'embedding', 'metric' => $metric, 'to' => '[1,0,0]'], 'L2, cosine or inner product');
+            }
+
+            $nearRefused(['col' => 'embedding', 'to' => '[1,0,0]']);
+            same(6, $count('docs'));
+        });
+
+        test("{$tag} a vector of the wrong size, or with SQL in it, is refused and nothing runs", function () use ($nearRefused, $count, $hasTable) {
+            $nearRefused(['col' => 'embedding', 'metric' => 'l2', 'to' => '[1,0]'], 'dimensions');
+
+            foreach (["[1,0,0]'); drop table docs; --", 'abc', '[1,0,0'] as $to) {
+                $nearRefused(['col' => 'embedding', 'metric' => 'l2', 'to' => $to]);
+            }
+
+            same(true, $hasTable('docs'));
+            same(6, $count('docs'));
+        });
+
+        test("{$tag} a nearest request with no vector to measure from is refused", function () use ($nearRefused) {
+            $nearRefused(['col' => 'embedding', 'metric' => 'l2'], 'Give a vector');
+            $nearRefused(['col' => 'embedding', 'metric' => 'l2', 'to' => ''], 'Give a vector');
+            $nearRefused(['col' => 'embedding', 'metric' => 'l2', 'to' => null], 'Give a vector');
+        });
+
+        test("{$tag} a nearest request from a row that is not there, or has no vector, or has a key with SQL in it, is refused", function () use ($nearRefused, $count, $hasTable) {
+            $nearRefused(['col' => 'embedding', 'metric' => 'l2', 'key' => ['id' => '99']], 'not there');
+            $nearRefused(['col' => 'embedding', 'metric' => 'l2', 'key' => ['id' => '5']], 'no value');
+            $nearRefused(['col' => 'embedding', 'metric' => 'l2', 'key' => ['x' => '1']]);
+
+            foreach (['1 or 1=1', '1; drop table docs', ''] as $id) {
+                $nearRefused(['col' => 'embedding', 'metric' => 'l2', 'key' => ['id' => $id]]);
+            }
+
+            same(true, $hasTable('docs'));
+            same(6, $count('docs'));
+        });
+
+        // Editing vectors goes through the same actions as any other value, and the database checks the value.
+
+        test("{$tag} a vector is saved as typed, and one of the wrong size or with SQL in it is refused and changes nothing", function () use ($c, $docs, $pdo, $vectorText, $count) {
+            $row2 = $docs + ['keys' => [['id' => '2']]];
+
+            try {
+                $c->ok('update', $row2 + ['changes' => ['embedding' => '[0.5,0.5,0]']]);
+                same('[0.5,0.5,0]', $vectorText(2));
+                same('[1,0,0]', $vectorText(1), 'no other row changed');
+
+                $c->refused('update', $row2 + ['changes' => ['embedding' => '[1,2]']], 'dimensions');
+                same('[0.5,0.5,0]', $vectorText(2), 'a vector of the wrong size is not stored');
+
+                $c->refused('update', $row2 + ['changes' => ['title' => 'changed', 'embedding' => '[1,2]']], 'dimensions');
+                same('two', $pdo->query('select title from docs where id = 2')->fetchColumn(), 'the title changes with the vector or not at all');
+
+                $c->refused('update', $row2 + ['changes' => ['embedding' => "[1,0,0]'); update docs set title = 'x'; --"]]);
+                same('[0.5,0.5,0]', $vectorText(2));
+                same(0, (int) $pdo->query("select count(*) from docs where title = 'x'")->fetchColumn(), 'SQL in a value is never run');
+                same(6, $count('docs'));
+            } finally {
+                $pdo->exec("update docs set title = 'two', embedding = '[0,1,0]' where id = 2");
+            }
+        });
+
+        test("{$tag} a paste of vectors with one of the wrong size keeps none", function () use ($c, $docs, $pdo, $vectorText) {
+            try {
+                $c->refused('update_each', $docs + ['items' => [
+                    ['key' => ['id' => '2'], 'changes' => ['embedding' => '[0.5,0.5,0]']],
+                    ['key' => ['id' => '3'], 'changes' => ['embedding' => '[1,2]']],
+                ]], 'dimensions');
+
+                same('[0,1,0]', $vectorText(2), 'the first row is rolled back');
+                same('[0.9,0.1,0]', $vectorText(3));
+            } finally {
+                $pdo->exec("update docs set embedding = '[0,1,0]' where id = 2");
+            }
+        });
+
+        test("{$tag} a new row with a vector is stored, and one with a vector of the wrong size is refused", function () use ($c, $docs, $pdo, $vectorText, $count) {
+            try {
+                $c->ok('insert', $docs + ['values' => ['id' => '7', 'title' => 'seven', 'embedding' => '[0,0,1]']]);
+                same('[0,0,1]', $vectorText(7));
+                same(7, $count('docs'));
+
+                $c->refused('insert', $docs + ['values' => ['id' => '8', 'title' => 'eight', 'embedding' => '[1,2]']], 'dimensions');
+                same(0, (int) $pdo->query('select count(*) from docs where id = 8')->fetchColumn(), 'the row with the wrong size was not added');
+                same(7, $count('docs'));
+            } finally {
+                $pdo->exec('delete from docs where id in (7, 8)');
+            }
+        });
+
+        test("{$tag} saving a column of type vector(3) adds a column of three dimensions", function () use ($c, $db, $pdo, $dropTables, $columnsOf) {
+            $dropTables('probe_vector_col');
+            $pdo->exec('create table probe_vector_col (id integer primary key)');
+            $pdo->exec('insert into probe_vector_col values (1)');
+            $table = ['db' => $db, 'table' => ['name' => 'probe_vector_col']];
+            $typeOf = fn () => $pdo->query("select format_type(a.atttypid, a.atttypmod) from pg_attribute a
+                where a.attrelid = 'public.probe_vector_col'::regclass and a.attname = 'embedding' and not a.attisdropped")->fetchColumn();
+
+            try {
+                // A size the database refuses leaves the table as it was.
+                $c->refused('save_column', $table + ['run' => true, 'spec' => ['name' => 'embedding', 'type' => 'vector(0)']]);
+                same(['id'], $columnsOf('probe_vector_col'));
+
+                $r = $c->ok('save_column', $table + ['run' => true, 'spec' => ['name' => 'embedding', 'type' => 'vector(3)']]);
+
+                check(count($r['sql']) >= 1, 'the answer says what ran');
+                same('vector(3)', $typeOf());
+                same(['id', 'embedding'], $columnsOf('probe_vector_col'));
+                $pdo->exec("update probe_vector_col set embedding = '[1,2,3]'");
+                fails(fn () => $pdo->exec("update probe_vector_col set embedding = '[1,2]'"), 'dimensions');
+            } finally {
+                $dropTables('probe_vector_col');
+            }
+        });
+
+        // Health. A table is only worth an index when it is big, and the planner's estimate of that comes from ANALYZE.
+        // The loose column has no fixed size, so no index can be made on it and it is never named.
+
+        $bigDocs = function () use ($pdo): void {
+            $pdo->exec('drop table if exists docs_big');
+            $pdo->exec('create table docs_big (id integer primary key, embedding vector(3), loose vector)');
+            $pdo->exec("insert into docs_big (id, embedding) select g, ('[' || g || ',1,1]')::vector from generate_series(1, 10000) g");
+            $pdo->exec('analyze docs_big');
+        };
+        $unindexed = fn (): array => array_values(array_filter($c->ok('health', ['db' => $db])['findings'], fn ($f) => $f['group'] === 'Vector columns without an index'));
+        $tablesOfFindings = fn (array $findings): array => array_map(fn ($f) => $f['table']['name'], $findings);
+
+        test("{$tag} a big table with a vector column and no index is reported, with the SQL that adds one", function () use ($pdo, $bigDocs, $unindexed, $tablesOfFindings) {
+            $bigDocs();
+
+            try {
+                $found = $unindexed();
+
+                same(['docs_big'], $tablesOfFindings($found), 'one finding, for the big table only: the small docs table has no finding');
+                same('info', $found[0]['level']);
+                check(str_contains((string) $found[0]['sql'], 'using hnsw'), 'the SQL builds an HNSW index: '.$found[0]['sql']);
+                check(str_contains((string) $found[0]['sql'], '"embedding"'), 'the SQL names the column: '.$found[0]['sql']);
+                check(! str_contains((string) $found[0]['sql'], 'loose'), 'a column with no fixed size cannot be indexed, so it is not named');
+            } finally {
+                $pdo->exec('drop table if exists docs_big');
+            }
+        });
+
+        test("{$tag} the report goes when the vector column has an HNSW or IVFFlat index, and comes back when the index goes", function () use ($pdo, $bigDocs, $unindexed) {
+            $bigDocs();
+
+            try {
+                same(1, count($unindexed()), 'without an index the table is reported');
+
+                $pdo->exec('create index docs_big_hnsw on docs_big using hnsw (embedding vector_l2_ops)');
+                same([], $unindexed(), 'an HNSW index answers it');
+
+                $pdo->exec('drop index docs_big_hnsw');
+                same(1, count($unindexed()), 'without the index it is reported again');
+
+                $pdo->exec('create index docs_big_ivfflat on docs_big using ivfflat (embedding vector_l2_ops) with (lists = 10)');
+                same([], $unindexed(), 'an IVFFlat index answers it too');
+            } finally {
+                $pdo->exec('drop table if exists docs_big');
+            }
+        });
+
+        test("{$tag} the SQL in a report of a vector column without an index builds an index, and the report goes", function () use ($pdo, $bigDocs, $unindexed) {
+            $bigDocs();
+
+            try {
+                $found = $unindexed();
+                check($found !== [], 'the table without an index is reported');
+                $pdo->exec((string) $found[0]['sql']);
+
+                $methods = $pdo->query("select am.amname from pg_index i join pg_class c on c.oid = i.indexrelid join pg_am am on am.oid = c.relam
+                    where i.indrelid = 'public.docs_big'::regclass and not i.indisprimary")->fetchAll(PDO::FETCH_COLUMN);
+                same(['hnsw'], $methods, 'the SQL made one HNSW index');
+                same([], $unindexed());
+            } finally {
+                $pdo->exec('drop table if exists docs_big');
+            }
+        });
+
+        // Rows with no vector count towards the size as well, so the table is big without being heavy.
+        test("{$tag} a vector too long for HNSW is reported without SQL that would fail", function () use ($pdo, $unindexed) {
+            $pdo->exec('drop table if exists docs_long');
+            $pdo->exec('create table docs_long (id integer primary key, embedding vector(2001))');
+            $pdo->exec('insert into docs_long (id) select g from generate_series(1, 10000) g');
+            $pdo->exec('analyze docs_long');
+
+            try {
+                $found = array_values(array_filter($unindexed(), fn ($f) => $f['table']['name'] === 'docs_long'));
+                same(1, count($found), 'the long column is reported');
+                same(null, $found[0]['sql'], 'HNSW refuses more than 2000 numbers, so there is no SQL to run');
+                check(str_contains($found[0]['detail'], 'at most 2000'), 'the detail says why: '.$found[0]['detail']);
+            } finally {
+                $pdo->exec('drop table if exists docs_long');
+            }
+        });
+
+        // A host such as Supabase keeps extensions in a schema of their own. The operators and
+        // operator classes are then not found by their bare names.
+        test("{$tag} pgvector in a schema that is not on the search path still finds the nearest rows and builds the index", function () use ($c, $db, $connect, $idsOf) {
+            $extra = explode('/', $db, 2)[0].'/'.TEST_EXTRA_DATABASE;
+            $c->ok('create_database', ['db' => $db, 'name' => TEST_EXTRA_DATABASE]);
+
+            try {
+                $other = $connect(TEST_EXTRA_DATABASE);
+                $other->exec('drop extension if exists vector');
+                $other->exec('create schema ext');
+                $other->exec('create extension vector schema ext');
+                $other->exec('create table docs (id integer primary key, embedding ext.vector(3))');
+                $other->exec("insert into docs select g, case g when 1 then '[1,0,0]' when 2 then '[0,1,0]' when 3 then '[2,0,0]' end::ext.vector
+                    from generate_series(1, 10000) g");
+                $other->exec('analyze docs');
+
+                $answer = $c->ok('rows', ['db' => $extra, 'table' => ['name' => 'docs'], 'perPage' => 3,
+                    'near' => ['col' => 'embedding', 'metric' => 'cosine', 'to' => '[1,0,0]']]);
+                same([1, 3, 2], $idsOf($answer));
+
+                $found = array_values(array_filter($c->ok('health', ['db' => $extra])['findings'], fn ($f) => $f['group'] === 'Vector columns without an index'));
+                same(1, count($found), 'the table is reported');
+                $other->exec((string) $found[0]['sql']);
+                same(1, (int) $other->query("select count(*) from pg_indexes where tablename = 'docs' and indexdef like '%hnsw%'")->fetchColumn(), 'the SQL built the index');
+            } finally {
+                $other = null;
+                $c->ok('drop_database', ['db' => $extra, 'confirm' => TEST_EXTRA_DATABASE]);
+            }
+        });
+    }
+
+    if ($driver === 'mysql') {
+        test("{$tag} no column is a vector, and a nearest request is refused", function () use ($c, $db, $items) {
+            $info = $c->ok('tables', ['db' => $db])['info'];
+            same(false, $info['vector'] ?? false, 'there is no vector extension to report');
+
+            foreach (['structure', 'rows'] as $action) {
+                check(! in_array('vector', array_column($c->ok($action, $items)['table']['columns'], 'category'), true), "no column of items is a vector, in the answer to {$action}");
+            }
+
+            foreach (['name', 'qty'] as $col) {
+                $c->refused('rows', $items + ['near' => ['col' => $col, 'metric' => 'l2', 'to' => '[1,0,0]']], 'not a vector column');
+            }
+        });
+    }
+
     // The list of databases, the sidebar layout and signing out
 
     test("{$tag} the list of databases has a group with the test database in it", function () use ($c, $db, $driver) {

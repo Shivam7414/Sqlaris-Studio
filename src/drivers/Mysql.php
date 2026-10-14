@@ -471,6 +471,11 @@ final class DbvMysql extends DbvDriver
         return ! in_array($column['category'], ['json', 'binary', 'other'], true);
     }
 
+    public function distance(string $expr, string $metric, string $to): string
+    {
+        throw new DbvError('Finding the nearest rows works only on PostgreSQL with pgvector.');
+    }
+
     public function value(array $column, string $value): string
     {
         if ($column['category'] === 'bool') {

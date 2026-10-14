@@ -45,6 +45,10 @@ output: `pgsql: skipped` or `mysql: skipped` means that system was not tested.
   the variables set for that command only:
   `TEST_MYSQL_HOST=127.0.0.1 php tests/php/run.php`. It creates and drops a database
   called `sqlaris_test`, so that name must be free.
+- A change to vector columns or the nearest-rows search needs pgvector on the PostgreSQL
+  server. `skip [pgsql] pgvector tests` in the output means they did not run. A container
+  gives one without touching the user's servers:
+  `docker run -d --rm -e POSTGRES_PASSWORD=test -p 55432:5432 pgvector/pgvector:pg18`.
 - Never write `tests/.env` or put a password in a file without being asked.
 - If neither system can be tested, say so plainly in the report.
 

@@ -31,7 +31,7 @@ abstract class DbvDriver
     public const PORT = 0;
 
     /** What the page knows about a column's type, whatever the system calls it. */
-    public const CATEGORIES = ['number', 'text', 'bool', 'date', 'datetime', 'time', 'interval', 'json', 'uuid', 'binary', 'array', 'other'];
+    public const CATEGORIES = ['number', 'text', 'bool', 'date', 'datetime', 'time', 'interval', 'json', 'uuid', 'binary', 'array', 'vector', 'other'];
 
     // Every query names its table "dbv". A bare "t" would be read as a column
     // if the table happens to have one called t.
@@ -103,6 +103,9 @@ abstract class DbvDriver
 
     /** Whether = and < work on the column's own type. The rest compare as text. */
     abstract public function comparable(array $column): bool;
+
+    /** How far a vector column is from $to, by l2, cosine or ip, for the nearest-rows search. */
+    abstract public function distance(string $expr, string $metric, string $to): string;
 
     /**
      * Inserts one row and returns its primary key, to read the row back, or
