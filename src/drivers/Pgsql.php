@@ -761,6 +761,236 @@ final class DbvPgsql extends DbvDriver
         }
     }
 
+    public function backupSchema(array $tables, array $views): array
+    {
+        $oids = array_map(fn ($t) => (int) $t['oid'], $tables);
+        $in = $oids === [] ? '0' : implode(', ', $oids);
+        $name = fn (string $schema, string $rel): string => $this->quote($schema).'.'.$this->quote($rel);
+        // The times were read in UTC, so they go back in UTC.
+        $head = ["set client_encoding = 'UTF8';", 'set standard_conforming_strings = on;', "set time zone 'UTC';"];
+        $tail = [];
+        $leftOut = ['functions and procedures', 'triggers', 'domain and composite types', 'sequences no column owns',
+            'row security policies', 'users and grants'];
+
+        foreach (array_unique(array_column([...$tables, ...$views], 'schema')) as $schema) {
+            if ($schema !== 'public') {
+                $head[] = 'create schema if not exists '.$this->quote($schema).';';
+            }
+        }
+
+        foreach (dbv_all($this->pdo, "select extname from pg_extension where extname <> 'plpgsql' order by extname") as $ext) {
+            $head[] = 'create extension if not exists '.$this->quote($ext['extname']).';';
+        }
+
+        // The enum types the columns use, also as arrays of the enum.
+        foreach (dbv_all($this->pdo,
+            "select n.nspname as schema, t.typname as name, json_agg(e.enumlabel order by e.enumsortorder) as labels
+            from pg_type t join pg_namespace n on n.oid = t.typnamespace join pg_enum e on e.enumtypid = t.oid
+            where t.oid in (select a.atttypid from pg_attribute a where a.attrelid in ({$in}))
+                or t.typarray in (select a.atttypid from pg_attribute a where a.attrelid in ({$in}))
+            group by n.nspname, t.typname order by 1, 2") as $enum) {
+            $labels = array_map([$this->pdo, 'quote'], json_decode($enum['labels'], true));
+            $head[] = 'create type '.$name($enum['schema'], $enum['name']).' as enum ('.implode(', ', $labels).');';
+        }
+
+        // Sequences a column owns, as serial makes them. Identity columns make their own.
+        foreach (dbv_all($this->pdo,
+            "select s.schemaname, s.sequencename, s.data_type, s.start_value, s.min_value, s.max_value, s.increment_by, s.cycle,
+                s.last_value, tn.nspname as tschema, tc.relname as tname, a.attname as col
+            from pg_depend d
+            join pg_class sc on sc.oid = d.objid and sc.relkind = 'S'
+            join pg_sequences s on s.schemaname = (select nspname from pg_namespace where oid = sc.relnamespace) and s.sequencename = sc.relname
+            join pg_class tc on tc.oid = d.refobjid join pg_namespace tn on tn.oid = tc.relnamespace
+            join pg_attribute a on a.attrelid = d.refobjid and a.attnum = d.refobjsubid
+            where d.refobjid in ({$in}) and d.deptype = 'a' and d.classid = 'pg_class'::regclass") as $seq) {
+            $seqName = $name($seq['schemaname'], $seq['sequencename']);
+            $head[] = "create sequence {$seqName} as {$seq['data_type']} increment {$seq['increment_by']} minvalue {$seq['min_value']}"
+                ." maxvalue {$seq['max_value']} start {$seq['start_value']}".($seq['cycle'] ? ' cycle' : '').';';
+            $tail[] = "alter sequence {$seqName} owned by ".$name($seq['tschema'], $seq['tname']).'.'.$this->quote($seq['col']).';';
+
+            if ($seq['last_value'] !== null) {
+                $tail[] = 'select setval('.$this->pdo->quote($seqName).", {$seq['last_value']}, true);";
+            }
+        }
+
+        $creates = [];
+
+        foreach ($tables as $t) {
+            $table = $name($t['schema'], $t['name']);
+            $lines = [];
+
+            foreach (dbv_all($this->pdo,
+                'select a.attname as name, format_type(a.atttypid, a.atttypmod) as type, a.attnotnull as not_null,
+                    pg_get_expr(d.adbin, d.adrelid) as def, a.attidentity as identity, a.attgenerated as generated
+                from pg_attribute a left join pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum
+                where a.attrelid = ? and a.attnum > 0 and not a.attisdropped order by a.attnum', [$t['oid']]) as $c) {
+                $line = '  '.$this->quote($c['name']).' '.$c['type'];
+
+                if ($c['generated'] === 's') {
+                    $line .= " generated always as ({$c['def']}) stored";
+                } elseif ($c['identity'] !== '') {
+                    $line .= ' generated '.($c['identity'] === 'a' ? 'always' : 'by default').' as identity';
+                } elseif ($c['def'] !== null) {
+                    $line .= ' default '.$c['def'];
+                }
+
+                $lines[] = $line.($c['not_null'] ? ' not null' : '');
+
+                // An identity column's next number follows the highest value it holds.
+                if ($c['identity'] !== '') {
+                    $col = $this->quote($c['name']);
+                    $tail[] = 'select setval(pg_get_serial_sequence('.$this->pdo->quote($table).', '.$this->pdo->quote($c['name'])."), coalesce(max({$col}), 1), max({$col}) is not null) from {$table};";
+                }
+            }
+
+            foreach (dbv_all($this->pdo,
+                "select conname, contype, confrelid, pg_get_constraintdef(oid) as def from pg_constraint
+                where conrelid = ? and contype in ('p', 'u', 'c', 'x', 'f') order by contype = 'p' desc, conname", [$t['oid']]) as $con) {
+                $constraint = 'constraint '.$this->quote($con['conname']).' '.$con['def'];
+
+                if ($con['contype'] !== 'f') {
+                    $lines[] = '  '.$constraint;
+                } elseif (in_array((int) $con['confrelid'], $oids, true)) {
+                    // Keys between tables go on after the rows, so the order of the tables does not matter.
+                    $tail[] = "alter table {$table} add {$constraint};";
+                } else {
+                    $leftOut[] = "the foreign key {$con['conname']} of {$t['name']}, which points to a table not in the backup";
+                }
+            }
+
+            // By schema and name, as two schemas can each have a table of the same name.
+            $at = "{$t['schema']}.{$t['name']}";
+            $creates[$at] = "create table {$table} (\n".implode(",\n", $lines)."\n);";
+
+            if ($t['comment'] !== null) {
+                $creates[$at] .= "\ncomment on table {$table} is ".$this->pdo->quote($t['comment']).';';
+            }
+
+            foreach ($t['columns'] as $c) {
+                if ($c['comment'] !== null) {
+                    $creates[$at] .= "\ncomment on column {$table}.".$this->quote($c['name']).' is '.$this->pdo->quote($c['comment']).';';
+                }
+            }
+
+            // Indexes go on after the rows too, which loads them faster. Those a constraint makes come with it.
+            foreach (dbv_all($this->pdo,
+                'select pg_get_indexdef(i.indexrelid) as def from pg_index i
+                where i.indrelid = ? and not exists (select 1 from pg_constraint c where c.conindid = i.indexrelid and c.conrelid = i.indrelid)',
+                [$t['oid']]) as $index) {
+                $tail[] = $index['def'].';';
+            }
+        }
+
+        // Views in the order they were made, which is after the views they read.
+        usort($views, fn ($a, $b) => $a['oid'] <=> $b['oid']);
+
+        foreach ($views as $v) {
+            $def = rtrim((string) dbv_one($this->pdo, 'select pg_get_viewdef(?::oid, true) as def', [$v['oid']])['def'], "; \n");
+            $tail[] = ($v['kind'] === 'materialized view' ? 'create materialized view ' : 'create view ').$name($v['schema'], $v['name'])." as\n{$def};";
+        }
+
+        return ['head' => $head, 'tables' => $creates, 'tail' => $tail, 'left_out' => $leftOut];
+    }
+
+    public function keys(array $t): array
+    {
+        $keys = [];
+
+        // Without its own name and its table, an index reads "CREATE INDEX ON USING btree (a)".
+        foreach (dbv_all($this->pdo,
+            'select c.relname as name, pg_get_indexdef(i.indexrelid) as def from pg_index i join pg_class c on c.oid = i.indexrelid
+            where i.indrelid = ? and not exists (select 1 from pg_constraint k where k.conindid = i.indexrelid and k.conrelid = i.indrelid)
+            order by 1', [$t['oid']]) as $index) {
+            if (preg_match('/^CREATE (UNIQUE )?INDEX .+? ON (?:ONLY )?.+? (USING .+)$/s', $index['def'], $m)) {
+                $keys[$index['name']] = ['kind' => $m[1] ? 'unique index' : 'index', 'def' => $m[2]];
+            }
+        }
+
+        foreach (dbv_all($this->pdo,
+            "select conname as name, contype as kind, pg_get_constraintdef(oid) as def from pg_constraint
+            where conrelid = ? and contype in ('u', 'c', 'x', 'f') order by 1", [$t['oid']]) as $con) {
+            $keys[$con['name']] = ['kind' => self::CONSTRAINTS[$con['kind']], 'def' => $con['def']];
+        }
+
+        return $keys;
+    }
+
+    public function keySql(array $t, string $name, array $key, bool $add): string
+    {
+        $table = $this->tableName($t);
+
+        if (str_ends_with($key['kind'], 'index')) {
+            return $add
+                ? 'create '.($key['kind'] === 'unique index' ? 'unique ' : '').'index '.$this->quote($name)." on {$table} {$key['def']};"
+                : 'drop index '.$this->quote($t['schema']).'.'.$this->quote($name).';';
+        }
+
+        return "alter table {$table} ".($add ? 'add constraint '.$this->quote($name).' '.$key['def'] : 'drop constraint '.$this->quote($name)).';';
+    }
+
+    public function dumpValue(string $expr, array $column): string
+    {
+        return $this->text($expr, $column);
+    }
+
+    public function dumpLiteral(?string $value, array $column): string
+    {
+        return $this->literal($value, $column);
+    }
+
+    public function dumpInsert(array $t, array $names): string
+    {
+        // A column that is "generated always as identity" takes its old value only when told to.
+        $always = array_filter($t['columns'], fn ($c) => $c['readonly'] && ! $c['generated'] && in_array($c['name'], $names, true));
+
+        return 'insert into '.$this->tableName($t).' ('.implode(', ', array_map([$this, 'quote'], $names)).')'
+            .($always === [] ? '' : ' overriding system value').' values';
+    }
+
+    public function snapshot(): void
+    {
+        $this->pdo->exec('begin isolation level repeatable read read only');
+    }
+
+    public function stream(string $sql): iterable
+    {
+        // A cursor hands the rows over a thousand at a time. It needs the transaction snapshot() began.
+        $this->pdo->exec('declare dbv_backup no scroll cursor for '.$sql);
+
+        try {
+            do {
+                $rows = $this->pdo->query('fetch forward 1000 from dbv_backup')->fetchAll(PDO::FETCH_NUM);
+
+                foreach ($rows as $row) {
+                    yield $row;
+                }
+            } while (count($rows) === 1000);
+        } finally {
+            $this->pdo->exec('close dbv_backup');
+        }
+    }
+
+    public function estimate(array $t): ?int
+    {
+        // -1 means the table was never analyzed, so there is no estimate yet.
+        $rows = dbv_one($this->pdo, 'select reltuples::bigint as n from pg_class where oid = ?', [$t['oid']]);
+
+        return $rows === null || (int) $rows['n'] < 0 ? null : (int) $rows['n'];
+    }
+
+    public function timeLimit(?int $seconds): void
+    {
+        $this->pdo->exec('set statement_timeout = '.$this->pdo->quote(($seconds ?? 30).'s'));
+    }
+
+    public function cancelTagged(string $tag): int
+    {
+        return count(dbv_all($this->pdo,
+            "select pg_cancel_backend(pid) from pg_stat_activity
+            where datname = current_database() and pid <> pg_backend_pid() and state = 'active' and query like ?",
+            ['%'.trim(self::tagComment($tag)).'%']));
+    }
+
     /** Ends every other session in a database. PostgreSQL copies or drops only a database nobody is in. */
     private static function closeSessions(PDO $pdo, string $name): void
     {

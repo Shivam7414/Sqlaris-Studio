@@ -176,6 +176,69 @@ abstract class DbvDriver
     /** Stops a session's query, or with $kill ends the session. */
     abstract public function stop(int $id, bool $kill): void;
 
+    /** The catalog's guess at a table's row count, kept by ANALYZE, or null when it has none. */
+    abstract public function estimate(array $t): ?int;
+
+    /** Gives each query on this connection at most $seconds, or with null the usual 30 again. */
+    abstract public function timeLimit(?int $seconds): void;
+
+    /** Stops every query of this database that carries the comment of $tag. @return int how many */
+    abstract public function cancelTagged(string $tag): int;
+
+    /**
+     * What a backup needs to make these tables and views again, as SQL
+     * statements: "head" before any table (settings, schemas, types,
+     * sequences), "tables" each table's CREATE by its key, "tail" after the
+     * rows (keys between tables, indexes, sequence values, views), and
+     * "left_out" what the backup could not take, in plain words.
+     *
+     * @param  list<array>  $tables  from table()
+     * @param  list<array>  $views  from table()
+     * @return array{head: list<string>, tables: array<string, string>, tail: list<string>, left_out: list<string>}
+     */
+    abstract public function backupSchema(array $tables, array $views): array;
+
+    /**
+     * The indexes and constraints of $t other than its primary key, by name,
+     * each with a definition that does not name the table or the database, so
+     * the same key in two databases reads the same.
+     *
+     * @return array<string, array{kind: string, def: string}>
+     */
+    abstract public function keys(array $t): array;
+
+    /** The SQL that adds $key, as keys() gave it, to $t, or with $add false drops it. */
+    abstract public function keySql(array $t, string $name, array $key, bool $add): string;
+
+    /** A column as a backup reads it, so its INSERT puts back the very same value. */
+    abstract public function dumpValue(string $expr, array $column): string;
+
+    /** A value dumpValue read, as SQL. */
+    abstract public function dumpLiteral(?string $value, array $column): string;
+
+    /** The start of a backup's INSERT into $t of these columns, up to VALUES. */
+    public function dumpInsert(array $t, array $names): string
+    {
+        return 'insert into '.$this->quote($t['name']).' ('.implode(', ', array_map([$this, 'quote'], $names)).') values';
+    }
+
+    /** One read-only transaction for the whole backup, so every table is read at the same moment. */
+    abstract public function snapshot(): void;
+
+    /**
+     * The rows of a query a few at a time, so a big table is never held in
+     * memory whole.
+     *
+     * @return iterable<list<?string>>
+     */
+    abstract public function stream(string $sql): iterable;
+
+    /** The comment that marks a query, so the page can stop it while it runs. */
+    public static function tagComment(string $tag): string
+    {
+        return $tag === '' ? '' : "/* sqlaris:{$tag} */ ";
+    }
+
     /** Creates a database, empty or as a copy of another. @return list<string> anything the copy left out */
     abstract public static function createDatabase(PDO $pdo, string $name, ?string $copyOf): array;
 

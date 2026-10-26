@@ -61,6 +61,11 @@ wrong database by accident.
 
 - Exact row counts, sorting, a search across every column and per-column filters
   (equals, contains, greater than, is NULL and more).
+- Big tables stay quick. A page of rows loads first and the count after it. A table of
+  more than a million rows (`count_limit`) shows the database's own estimate, "about
+  12M", until a search or filter narrows it. A count that takes more than 3 seconds
+  (`count_seconds`) gives up and the rows still show. A slow load shows a Stop button,
+  and a new search stops the one it replaces, so old queries do not keep running.
 - Edit cells in place like a spreadsheet. Dates get a calendar, enums and CHECK lists get
   a dropdown, and a foreign key gets a search of the table it points to. Every edit can be
   undone from the toast.
@@ -125,6 +130,20 @@ of the tables most others point to, and it shows with the tables linked to it. F
 A SQL editor (CodeMirror) with autocomplete for tables, columns and aliases, EXPLAIN and
 a history of the last 50 queries. It runs read only unless you turn on "Allow changes".
 
+- Run runs everything, or only the part you selected. Run statement runs only the one
+  statement the cursor is in, so a file of many queries can stay in the editor.
+- Format lays the SQL out one clause per line. Only spaces and line breaks change:
+  words keep their case, and strings and comments stay as you wrote them.
+- The rows of a plain query on one table can be edited where they show, as in the
+  data grid: `select` of columns or `*`, from one table, with at most `where`,
+  `order by`, `limit` and `offset`, and the table's primary key among the columns.
+  Anything else (a join, a `group by`, a column worked out from others) stays read only.
+- A result with a number column can show as a chart: Table or Chart above the rows.
+  Pick the column that names each row and the number to draw, as bars or a line. The
+  chart takes the first 200 rows.
+- Saved keeps queries by name for each database, in your browser. It also opens a
+  `.sql` file into the editor and downloads the editor as one.
+
 With changes allowed, the whole script runs in one transaction: it is kept if every
 statement works and undone if one fails. Each run is its own request, so a transaction
 cannot stay open while you look at the result and decide. The script can end the
@@ -153,11 +172,37 @@ want the whole script kept or undone together.
   optimize, analyze and check on MySQL. Copy, rename, empty or drop a table. Copy, create
   or drop a database. Each table in a database's list has Browse, Structure, SQL, Empty and
   Drop buttons, and a menu for the rest.
+- Back up a database from Operations: every table, or the ones you tick, with or without
+  their rows, as one `.sql` file. Every table is read at the same moment, so the rows
+  agree with each other. Restore from a `.sql` file runs one into the open database. On
+  PostgreSQL it runs in one transaction, so a failed restore leaves nothing behind. MySQL
+  keeps each table as soon as it is made, so restore into an empty database. The backup
+  has tables, rows, keys, indexes, views, enum types, sequences and comments. It does not
+  have functions, triggers, events, domain types, users or grants, and says so at the top. For a
+  database too big to send in one request (`post_max_size` in `php.ini`), use
+  `pg_dump` or `mysqldump`.
+- Compare the open database with another one of the same system, such as your local
+  copy with staging, from Operations. It lists the tables only in one of them and the
+  columns, indexes, keys and views that differ, with the SQL that makes the open one
+  match. Nothing runs from there: Open in SQL puts the script in the SQL tab to read
+  first. Anything that could throw data away (dropping a table, column or view the other
+  one does not have, or a new column type that can cut or round values) comes as
+  commented lines, so running the script as it is never loses anything.
 - Open several databases side by side in tabs along the top. Each tab keeps the table,
   filters and page you left it on. A middle click closes a tab.
 - Group, reorder and hide databases in the list the + button opens. Each database can
   have its own accent colour, so you can tell at a glance which one you are about to
   change.
+- Protect a database you must not change by accident, such as a copy of production:
+  right-click it in the list, or use Operations, and pick Protect. Or list name patterns
+  under `protect` for a server in `config.php`, such as `'protect' => ['*prod*']`. Reading
+  works as usual. Any change (an edit, an import, SQL with changes allowed, dropping a
+  table, taking the protection off) first asks you to type the database's name, then
+  works for 15 minutes in that sign-in. The server checks this, so no part of the page
+  can skip it. One gap: on MySQL a single login reaches every database on the server, so
+  SQL run from another, unprotected database (`delete from prod.orders`, or a restore
+  file with `use prod`) is not stopped. Give the app a MySQL login without rights on
+  the databases it must not change if that matters.
 - Dark, light and Follow Windows themes, page colour palettes, and keyboard shortcuts
   you can remap.
 
@@ -248,11 +293,14 @@ Your own arrangement of the sidebar (custom groups, order, hidden databases) is 
 ## Themes and colours
 
 The page is dark by default. The switch in the top bar picks Dark, Light or Follow Windows.
-The palette button next to it picks the page colours, each in dark and light. Database, the
-default, paints the whole page in the colour of the database you are in, so you can see at a
-glance which one you are about to change. Midnight, Graphite, Ocean, Forest, Plum and Sand
-paint it in their own colour instead, and each database tab keeps its own colour. When the
-system asks for reduced motion, nothing animates.
+The palette button next to it picks the page colours, each in dark and light. The page itself
+stays neutral grey, and the colour marks what you act on: the open database tab, the main
+button, selected rows, filters, links and the focus ring. Database, the default, uses the
+colour of the database you are in, so you can see at a glance which one you are about to
+change. Graphite, Ocean, Forest, Plum and Sand use their own colour instead and shift the
+greys slightly towards it; Midnight brings only its blue. Each database tab keeps its own
+colour, and a database with no colour set is blue. When the system asks for reduced motion,
+nothing animates.
 
 ## Keyboard shortcuts
 
@@ -274,6 +322,8 @@ The change is kept in your browser, and Reset brings back the defaults. `Ctrl` a
 | `Ctrl+A` | Select every row on the page |
 | `Ctrl+S`, `Ctrl+Enter` | Save the row form |
 | `Ctrl+Enter`, `F5` | Run the SQL, or only the selected part |
+| `Ctrl+Shift+Enter` | Run only the SQL statement the cursor is in |
+| `Shift+Alt+F` | Lay out the SQL neatly |
 | `Ctrl+Space` | Suggest a table or column in SQL |
 | `Ctrl+/` | Comment out a SQL line |
 
@@ -414,8 +464,9 @@ TEST_MYSQL_PASSWORD=secret
 ```
 
 Each run makes a database called `sqlaris_test`, fills it, and drops it at the end. The
-tests of making and dropping a database also use `sqlaris_test_extra`. Use a server where
-both names are free. Every action in `api.php` must work in at least one test, or the run
+tests of making and dropping a database also use `sqlaris_test_extra`, and the tests of a
+database protected in `config.php` use `sqlaris_test_locked`. Use a server where all three
+names are free. Every action in `api.php` must work in at least one test, or the run
 fails and names it. The vector tests need a PostgreSQL server with pgvector available,
 such as the `pgvector/pgvector` image. On a server without it they are skipped, and the
 run prints a line that says so. GitHub Actions runs both suites on every push, with
@@ -456,7 +507,7 @@ These are kept in `assets/vendor`, each with its license file:
 | [Tom Select](https://tom-select.js.org/) | 2.6.2 | Apache-2.0 | Searchable dropdowns |
 | [flatpickr](https://flatpickr.js.org/) | 4.6.13 | MIT | Date and time picker |
 | [CodeMirror 5](https://codemirror.net/5/) | 5.65.21 | MIT | SQL editor and autocomplete |
-| [Inter](https://rsms.me/inter/) | 5.3.0 | OFL-1.1 | Interface font |
+| [Geist](https://vercel.com/font) | 5.3.0 | OFL-1.1 | Interface font |
 | [JetBrains Mono](https://www.jetbrains.com/lp/mono/) | 5.3.0 | OFL-1.1 | Values, ids and SQL |
 
 To change a version, edit it in `src/libraries.php` and run this from the viewer's folder:

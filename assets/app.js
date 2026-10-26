@@ -86,6 +86,8 @@
     pulse: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
     pause: '<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>',
     stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
+    lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+    unlock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.7-1.5"/>',
   };
 
   function icon(name, cls = '') {
@@ -359,15 +361,6 @@
     setTimeout(() => el.remove(), ms);
   }
 
-  // A faint light in the database colour follows the pointer over a card.
-  document.addEventListener('pointermove', e => {
-    const card = e.target.closest ? e.target.closest('.card') : null;
-    if (!card) return;
-    const r = card.getBoundingClientRect();
-    card.style.setProperty('--mx', `${e.clientX - r.left}px`);
-    card.style.setProperty('--my', `${e.clientY - r.top}px`);
-  }, { passive: true });
-
   // ----------------------------------------------------------------- tooltips
 
   // Every title="" shows as a tooltip in the page's own style, a moment after
@@ -488,6 +481,8 @@
     selectAll: { keys: ['Ctrl+A'], what: 'Select every row on the page' },
     save: { keys: ['Ctrl+S', 'Ctrl+Enter'], what: 'Save the row form' },
     run: { keys: ['Ctrl+Enter', 'F5'], what: 'Run the SQL, or only the part selected' },
+    runOne: { keys: ['Ctrl+Shift+Enter'], what: 'Run only the SQL statement the cursor is in' },
+    format: { keys: ['Shift+Alt+F'], what: 'Lay out the SQL neatly' },
     suggest: { keys: ['Ctrl+Space'], what: 'Suggest a table or column in SQL' },
     comment: { keys: ['Ctrl+/'], what: 'Comment out the SQL line, or back' },
     fit: { keys: ['F'], what: 'Fit the diagram to the screen' },
@@ -569,6 +564,12 @@
       if (raw && res.ok) return res;
       let data;
       try { data = await res.json(); } catch { data = { error: `The server answered with HTTP ${res.status}.` }; }
+      // A change to a protected database: ask for the name, then send the same request again.
+      const locked = data.db || body.db;
+      if (res.status === 423 && data.protected && locked) {
+        if (await unlockDb(locked)) return api(action, body, raw, quiet);
+        throw new Error(`${(dbById(locked) || {}).name || 'This database'} is protected, so nothing was changed.`);
+      }
       if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
       return data;
     } finally {
@@ -584,6 +585,8 @@
   const S = {
     groups: [],
     layout: null,
+    // The protected databases this sign-in unlocked, by id: when each unlock runs out, in ms.
+    unlocked: {},
     db: null,
     tables: null,
     info: null,
@@ -613,11 +616,11 @@
   const UI = {};
 
   // From config.php: which columns "Hide audit columns" hides, and the warning above an edit form.
-  const SETTINGS = { audit_columns: [], edit_warning: null };
+  const SETTINGS = { audit_columns: [], edit_warning: null, upload_limit: 0 };
 
   // The colour a database is given in config.php, so the one on screen is
   // never mistaken for another.
-  const dbColor = d => (d && d.color) || '#5b4ef0';
+  const dbColor = d => (d && d.color) || '#3d6fd4';
   const dbKind = d => (d.note ? `${d.note} database` : `${d.system} database`);
 
   const allDbs = () => S.groups.flatMap(g => g.items);
@@ -768,7 +771,11 @@
       renderShell();
       if (switching) announceDb();
       await loadTables();
-      if (seq !== routeSeq) return;
+      // A newer move drew the view while the tables were still on their way. Draw it again now they are here.
+      if (seq !== routeSeq) {
+        if (S.db === db) renderView();
+        return;
+      }
     }
 
     const table = st.table && S.tables && S.tables.some(t => sameTable(t, st.table)) ? st.table : null;
@@ -809,6 +816,7 @@
     const res = await api('databases');
     S.groups = res.groups;
     S.layout = { ...emptyLayout(), ...res.layout };
+    for (const [id, left] of Object.entries(res.unlocked || {})) markUnlocked(id, Date.now() + left * 1000);
     Object.assign(SETTINGS, res.settings);
     for (const g of S.groups) g.items.forEach(d => { d.group = g.label; });
   }
@@ -835,8 +843,6 @@
   // --------------------------------------------------------------- the shell
 
   function buildSkeleton() {
-    // The glow behind the page, in the colour of the database on screen.
-    document.body.prepend(h('div', { class: 'aurora', 'aria-hidden': 'true' }));
     UI.server = h('span', { class: 'server' });
     UI.dbTabs = h('div', { class: 'db-tabs' });
     UI.addTab = h('button', { class: 'btn ghost icon-only db-tab-add', title: 'Open a database', onclick: e => openDbMenu(e.currentTarget) }, icon('plus'));
@@ -901,13 +907,11 @@
     root.style.setProperty('--db', color);
   }
 
-  // Switching database: a light sweeps its tab and a toast names the database
-  // now open, while the colour flows to its own.
+  // Switching database: a toast names the database now open, while the
+  // colour flows to its own.
   function announceDb() {
     const db = dbById(S.db);
     if (!db) return;
-    const tab = UI.dbTabs.querySelector('.db-tab.active');
-    if (tab) tab.classList.add('sweep');
     toast(`Now on ${db.name}`, 'db');
   }
 
@@ -925,6 +929,7 @@
     UI.crumb = crumb;
     put(UI.crumbs,
       h('a', { href: stateToHash(home), onclick: e => { e.preventDefault(); go(home); } }, db ? db.name : ''),
+      isProtected(db) ? lockChip(db) : null,
       S.table ? [h('span', { class: 'sep' }, '/'), h('span', { class: 'current' + (newCrumb ? ' enter' : '') }, crumb)] : null);
 
     const tabs = S.table
@@ -938,6 +943,18 @@
     UI.tabSet = tabSet;
 
     renderThemeButton();
+  }
+
+  // Beside the database name, a lock: closed, a click unlocks it; open, a click locks it again.
+  // Only the icon, as the header has no room for words. The tooltip says it in words.
+  function lockChip(d) {
+    if (!isUnlocked(d.id)) {
+      const what = `${d.name} is protected. Unlock for 15 minutes`;
+      return h('button', { class: 'lock-chip', title: what, 'aria-label': what, onclick: () => unlockDb(d.id) }, icon('lock'));
+    }
+    const until = new Date(S.unlocked[d.id]).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const what = `${d.name} takes changes until ${until}. Lock it again now`;
+    return h('button', { class: 'lock-chip open', title: what, 'aria-label': what, onclick: () => lockDb(d.id) }, icon('unlock'));
   }
 
   function renderTableList() {
@@ -1084,7 +1101,7 @@
     ]);
   }
 
-  // Drawn again only when the tabs, their tables, your groups or the open one change, so a switch's sweep runs to the end.
+  // Drawn again only when the tabs, their tables, your groups or the open one change.
   function renderDbTabs() {
     const groups = myGroups();
     const grouped = dbGroups();
@@ -1193,9 +1210,9 @@
 
   let popover = null;
 
-  function openPopoverAt(rect, content, { width, alignRight = false, anchor = null, focus = true } = {}) {
+  function openPopoverAt(rect, content, { width, alignRight = false, anchor = null, focus = true, cls = '' } = {}) {
     closePopover();
-    const el = h('div', { class: 'popover' }, content);
+    const el = h('div', { class: ('popover ' + cls).trim() }, content);
     if (width) el.style.minWidth = width + 'px';
     document.body.append(el);
     const left = alignRight ? rect.right - el.offsetWidth : rect.left;
@@ -1470,7 +1487,7 @@
   // Your own arrangement of the list, kept in layout.json by the server. A
   // group of your own has a key starting "u:", a group from config.php "c:"
   // and its label, and the hidden databases sit in the group "hidden".
-  const emptyLayout = () => ({ groups: [], order: [], hidden: [], folded: {} });
+  const emptyLayout = () => ({ groups: [], order: [], hidden: [], protected: [], folded: {} });
 
   // The list as you arranged it: your groups and the groups config.php gives,
   // in your order, then the hidden databases. A config group whose databases
@@ -1531,7 +1548,9 @@
     if (dbMenu && dbMenu.el.isConnected) dbMenu.draw();
     fillGroupTabs();
     saveTabs();
-    renderDbTabs();
+    // Protecting a database changes the mark beside its name.
+    if (S.db) renderShell();
+    else renderDbTabs();
   }
 
   function changeLayout(change, message = null) {
@@ -1587,6 +1606,93 @@
     reopenDbMenu();
   }
 
+  // A protected database refuses changes until you type its name, and then
+  // takes them for 15 minutes. config.php can protect one, or you can here.
+  const isProtected = d => !!d && (d.protected === 'config' || S.layout.protected.includes(d.id));
+  const isUnlocked = id => (S.unlocked[id] || 0) > Date.now();
+  const unlockTimers = {};
+
+  // Shows the unlock until it runs out, and then shows the lock again.
+  function markUnlocked(id, until) {
+    clearTimeout(unlockTimers[id]);
+    if (until) S.unlocked[id] = until;
+    else delete S.unlocked[id];
+    if (until) unlockTimers[id] = setTimeout(() => { delete S.unlocked[id]; renderShell(); }, until - Date.now());
+  }
+
+  // Asks for the database's name. Gives true once it is unlocked. Two changes
+  // refused at the same moment share one question.
+  const unlocking = {};
+  function unlockDb(id) {
+    const d = dbById(id);
+    if (!d) return Promise.resolve(false);
+    unlocking[id] ||= new Promise(resolve => {
+      let done = false;
+      const input = h('input', { class: 'input mono', placeholder: d.name, spellcheck: false });
+      const ok = h('button', { class: 'btn primary', disabled: true }, icon('unlock'), 'Unlock');
+      input.addEventListener('input', () => { ok.disabled = input.value.trim() !== d.name; });
+      const form = h('form', { class: 'form-stack', onsubmit: e => { e.preventDefault(); if (!ok.disabled) ok.click(); } },
+        h('p', { class: 'muted', style: 'margin:0' }, `${d.name} is protected, so changes to it are blocked. Type its name to allow changes for 15 minutes.`),
+        input);
+      const modal = openModal({
+        title: `Unlock ${d.name}?`,
+        body: form,
+        actions: [h('button', { class: 'btn', onclick: () => modal.close() }, 'Cancel'), ok],
+        onClose: () => { delete unlocking[id]; resolve(done); },
+      });
+      input.focus();
+      ok.addEventListener('click', async () => {
+        ok.disabled = true;
+        try {
+          const r = await api('unlock', { db: id, name: input.value.trim() });
+          markUnlocked(id, r.until * 1000);
+          done = true;
+          modal.close();
+          renderShell();
+          toast(`${d.name} is unlocked for 15 minutes.`, 'ok', { label: 'Lock now', run: () => lockDb(id) });
+        } catch (e) {
+          toast(e.message, 'error');
+          ok.disabled = false;
+        }
+      });
+    });
+    return unlocking[id];
+  }
+
+  async function lockDb(id) {
+    try {
+      await api('lock', { db: id });
+      markUnlocked(id, null);
+      renderShell();
+      toast(`${dbById(id).name} is locked again.`, 'ok');
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+
+  // Taking protection off needs the name typed, as a change does, and the server checks that it was.
+  async function setProtected(d, on) {
+    if (!on && !isUnlocked(d.id)) {
+      if (!(await unlockDb(d.id))) return;
+    } else if (!on && !(await confirmBox({
+      title: `Stop protecting ${d.name}?`,
+      body: 'Changes to it will go through without asking for its name.',
+      confirm: 'Stop protecting',
+    }))) return;
+    changeLayout(L => {
+      L.protected = on ? [...L.protected, d.id] : L.protected.filter(id => id !== d.id);
+    }, on ? `${d.name} is protected.` : `${d.name} is not protected any more.`);
+    if (!on) markUnlocked(d.id, null);
+  }
+
+  // The menu items that protect a database, lock it or let it go.
+  const protectItems = d => (d.protected === 'config'
+    ? [{ label: 'Protected in config.php', icon: 'lock', disabled: true }]
+    : isProtected(d)
+      ? [{ label: 'Stop protecting', icon: 'unlock', run: () => setProtected(d, false) }]
+      : [{ label: 'Protect', icon: 'lock', hint: 'Changes to it ask for its name first', run: () => setProtected(d, true) }])
+    .concat(isProtected(d) && isUnlocked(d.id) ? [{ label: 'Lock now', icon: 'lock', run: () => lockDb(d.id) }] : []);
+
   // A menu action that changes the layout, then shows the list again.
   const andReopen = run => () => { run(); reopenDbMenu(); };
 
@@ -1602,6 +1708,8 @@
       g.hidden
         ? { label: 'Show again', icon: 'view', run: andReopen(() => changeLayout(L => placeDb(L, d, null))) }
         : { label: 'Hide', icon: 'eyeOff', run: andReopen(() => changeLayout(L => placeDb(L, d, 'hidden'))) },
+      'sep',
+      protectItems(d),
       'sep',
       { label: 'Copy name', icon: 'copy', run: () => copyText(d.name, 'Database name copied.') },
     ]);
@@ -1715,6 +1823,7 @@
         g.mine && !g.items.length ? h('div', { class: 'menu-empty' }, 'Drag a database here, or right-click one.') : null,
         g.items.map(d => h('button', {
           class: 'menu-item' + (d.id === S.db ? ' active' : ''),
+          title: `${dbKind(d)} on ${d.where}${isProtected(d) ? ', protected' : ''}. Right-click for more, or drag it to another group.`,
           draggable: 'true',
           dataset: { id: d.id },
           onclick: () => { closePopover(); openDb(d.id); },
@@ -1723,6 +1832,7 @@
         },
         h('span', { class: 'dot', style: `background:${dbColor(d)}` }),
         h('span', { class: 'grow' }, d.name),
+        isProtected(d) ? h('span', { class: 'lock-mark', title: 'Protected' }, icon('lock')) : null,
         d.note ? h('span', { class: 'tag' }, d.note) : null)),
       ]);
     };
@@ -1746,7 +1856,7 @@
     }, h('div', { class: 'db-menu-search' }, search), list, foot);
     dbMenu = { el: menu, draw };
     draw();
-    openPopover(anchor, menu, { width: 300 });
+    openPopover(anchor, menu, { width: 300, cls: 'db-popover' });
   }
 
   function queryTable(t) {
@@ -1798,6 +1908,12 @@
     return [
       maintenanceItems(null),
       'sep',
+      protectItems(dbById(S.db)),
+      'sep',
+      { label: 'Back up this database', icon: 'download', hint: 'Download its tables and rows as one .sql file', run: openBackup },
+      { label: 'Restore from a .sql file', icon: 'upload', hint: 'Run a backup into this database', run: openRestore },
+      { label: 'Compare with another database', icon: 'columns', hint: 'See how its tables differ, with the SQL that makes this one match', run: openCompare },
+      'sep',
       { label: 'New database', icon: 'plus', run: () => newDatabase(false) },
       { label: 'Copy this database', icon: 'copy', hint: 'A new database with every table and row of this one, for a snapshot before a test', run: () => newDatabase(true) },
       'sep',
@@ -1842,10 +1958,9 @@
           const y = b[sort.key] ?? '';
           return (typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y))) * sort.dir;
         });
-      // The rows come in one after another the first time, not on every key typed in the search.
-      put(tbody, list.map((t, i) => h('tr', {
-        class: 'clickable' + (arriving && i < 24 ? ' enter' : ''),
-        style: arriving && i < 24 ? `--i:${i}` : null,
+      // The rows fade in the first time, not on every key typed in the search.
+      put(tbody, list.map(t => h('tr', {
+        class: 'clickable' + (arriving ? ' enter' : ''),
         onclick: () => openTable(t),
         oncontextmenu: e => tableMenu(e, t),
       },
@@ -1981,7 +2096,7 @@
     const own = g => (g.hits.some(f => f.role === 'pk' || f.role === 'uq') ? 0 : 1);
     const label = t => tableIn(d, t.schema, t.name);
     const groups = [...byTable.values()].sort((a, b) => own(a) - own(b) || label(a.table).localeCompare(label(b.table)));
-    return groups.map((g, i) => h('section', { class: 'find-table', style: `--i:${Math.min(i, 12)}` },
+    return groups.map(g => h('section', { class: 'find-table' },
       h('header', null, icon('table'), h('b', null, label(g.table))),
       g.hits.map(f => findHit(f, d, value, open))));
   }
@@ -2185,20 +2300,43 @@
     put(UI.view, UI.dataRoot);
   }
 
+  // Each load of rows carries a tag of its own, so the database can be told
+  // to stop it: from the Stop button, or when a newer search replaces it.
   let rowsSeq = 0;
+  let rowsRun = null;
+  const newTag = () => Array.from(crypto.getRandomValues(new Uint8Array(8)), b => b.toString(16).padStart(2, '0')).join('');
+
+  function stopRows() {
+    const run = rowsRun;
+    if (!run) return;
+    rowsRun = null;
+    api('cancel', { db: run.db, tag: run.tag }, false, true).catch(() => { /* finished already */ });
+  }
+
   async function loadRows() {
+    // The rows still loading are not wanted any more, so the database stops reading them.
+    stopRows();
     const seq = ++rowsSeq;
+    const run = rowsRun = { db: S.db, tag: newTag(), stopped: false };
     const table = S.table;
     UI.grid.classList.add('loading');
     forceCloseDrawer();
+    // A load that takes a while gets a Stop button where the pager is.
+    const slow = setTimeout(() => {
+      if (rowsRun !== run) return;
+      put(UI.pager,
+        h('span', { class: 'muted' }, S.search || S.filters.length ? 'Searching...' : 'Loading...'),
+        h('button', { class: 'btn small', title: 'Stop reading the rows', onclick: () => { run.stopped = true; stopRows(); } }, icon('stop'), 'Stop'));
+    }, 800);
     try {
       const res = await api('rows', {
-        db: S.db, table, page: S.page, perPage: S.perPage, sort: S.sort, near: S.near, search: S.search, filters: S.filters,
+        db: S.db, table, page: S.page, perPage: S.perPage, sort: S.sort, near: S.near, search: S.search, filters: S.filters, tag: run.tag,
       });
       if (seq !== rowsSeq) return;
       S.data = res;
       // A filter can leave the current page past the end. Step back to the last page.
-      if (!res.rows.length && res.total > 0 && S.page > 1) {
+      // Only with an exact count: an estimate can point past the end again and again.
+      if (!res.rows.length && res.exact && res.total > 0 && S.page > 1) {
         refine({ page: Math.ceil(res.total / S.perPage) });
         return;
       }
@@ -2209,10 +2347,14 @@
       if (seq !== rowsSeq) return;
       S.data = null;
       S.grid = null;
-      put(UI.grid, h('div', { class: 'pad' }, errorBox(e.message)));
+      put(UI.grid, h('div', { class: 'pad' }, run.stopped
+        ? h('p', { class: 'muted' }, 'Stopped. Narrow the rows with a search or a filter, then try again.')
+        : errorBox(e.message)));
       put(UI.pager);
       renderSelectBar();
     } finally {
+      clearTimeout(slow);
+      if (rowsRun === run) rowsRun = null;
       if (seq === rowsSeq) UI.grid.classList.remove('loading');
     }
   }
@@ -2310,10 +2452,17 @@
   }
 
   function renderPager() {
-    const { total, page, perPage, rows, ms, table: meta } = S.data;
-    const pages = Math.max(1, Math.ceil(total / perPage));
-    const from = total ? (page - 1) * perPage + 1 : 0;
+    const { total, exact, page, perPage, rows, ms, table: meta } = S.data;
+    // A big table gives an estimate, and a slow search no total at all. Then
+    // a full page means there may be more, whatever the estimate says.
+    const known = total != null;
+    const pages = known ? Math.max(1, Math.ceil(total / perPage)) : null;
+    const more = rows.length === perPage && (!known || exact === false || page < pages);
+    const from = rows.length ? (page - 1) * perPage + 1 : 0;
     const to = (page - 1) * perPage + rows.length;
+    const of = !known ? '' : exact === false ? ` of about ${fmtCompact(total)}` : ` of ${fmtN(total)}`;
+    const countNote = !known ? 'Counting every match took too long, so the total is not shown.'
+      : exact === false ? 'An estimate from the database. Counting a table this big reads every row, which takes a while.' : null;
     const perPageSelect = h('select', {
       class: 'input',
       onchange: e => {
@@ -2325,7 +2474,7 @@
     perPageSelect.value = String(perPage);
 
     put(UI.pager,
-      h('span', { class: 'muted' }, total ? `Rows ${fmtN(from)} to ${fmtN(to)} of ${fmtN(total)}` : 'No rows'),
+      h('span', { class: 'muted', title: countNote }, rows.length ? `Rows ${fmtN(from)} to ${fmtN(to)}${of}` : 'No rows'),
       h('span', { class: 'faint' }, `${ms} ms`),
       rows.length ? h('span', { class: 'faint hint' }, meta.editable ? 'Double-click a cell to edit it. Right-click for more.' : 'Right-click a cell for more.') : null,
       h('div', { class: 'spacer' }),
@@ -2333,11 +2482,11 @@
       h('button', { class: 'btn icon-only', title: 'Previous page', disabled: page <= 1, onclick: () => refine({ page: page - 1 }, false) }, icon('left')),
       h('span', { class: 'muted' }, 'Page'),
       h('input', {
-        class: 'input page-input', type: 'number', min: 1, max: pages, value: String(page),
-        onchange: e => refine({ page: clamp(Number(e.target.value), 1, pages) }, false),
+        class: 'input page-input', type: 'number', min: 1, max: exact === false || !known ? null : pages, value: String(page),
+        onchange: e => refine({ page: exact === false || !known ? Math.max(1, Number(e.target.value) || 1) : clamp(Number(e.target.value), 1, pages) }, false),
       }),
-      h('span', { class: 'muted' }, `of ${fmtN(pages)}`),
-      h('button', { class: 'btn icon-only', title: 'Next page', disabled: page >= pages, onclick: () => refine({ page: page + 1 }, false) }, icon('right')));
+      known ? h('span', { class: 'muted' }, exact === false ? `of about ${fmtCompact(pages)}` : `of ${fmtN(pages)}`) : null,
+      h('button', { class: 'btn icon-only', title: 'Next page', disabled: !more, onclick: () => refine({ page: page + 1 }, false) }, icon('right')));
   }
 
   function addFilter(col) {
@@ -2499,7 +2648,7 @@
   function openExportMenu(anchor) {
     const total = S.data ? S.data.total : 0;
     openPopover(anchor, menuList([
-      { title: `Every matching row, ${plural(total, 'row')}` },
+      { title: total == null ? 'Every matching row' : S.data.exact === false ? `Every matching row, about ${fmtCompact(total)}` : `Every matching row, ${plural(total, 'row')}` },
       { label: 'CSV, opens in Excel', icon: 'list', run: () => exportAll('csv') },
       { label: 'JSON', icon: 'code', run: () => exportAll('json') },
       { label: 'SQL INSERT statements', icon: 'database', run: () => exportAll('sql') },
@@ -2887,6 +3036,182 @@
     });
   }
 
+  // A .sql file of every table you pick, with or without its rows.
+  function openBackup() {
+    const db = dbById(S.db);
+    const tables = (S.tables || []).filter(t => t.kind !== 'foreign table');
+    let rows = 'rows';
+    const picked = new Set(tables.map(tableKey));
+    const count = h('span', { class: 'muted small' });
+    const list = h('div', { class: 'backup-list' });
+    const every = h('input', { type: 'checkbox', checked: true });
+    const ok = h('button', { class: 'btn primary' }, icon('download'), 'Download backup');
+    const sync = () => {
+      every.checked = picked.size === tables.length;
+      every.indeterminate = picked.size > 0 && picked.size < tables.length;
+      count.textContent = `${fmtN(picked.size)} of ${plural(tables.length, 'table')}`;
+      ok.disabled = !picked.size;
+    };
+    every.addEventListener('change', () => {
+      tables.forEach(t => (every.checked ? picked.add(tableKey(t)) : picked.delete(tableKey(t))));
+      list.querySelectorAll('input').forEach(x => { x.checked = every.checked; });
+      sync();
+    });
+    put(list, tables.map(t => {
+      const box = h('input', { type: 'checkbox', checked: true, onchange: e => { e.target.checked ? picked.add(tableKey(t)) : picked.delete(tableKey(t)); sync(); } });
+      return h('label', { class: 'check' }, box, h('span', null, tableLabel(t)),
+        h('small', { class: 'faint' }, isView(t) ? t.kind : t.rows == null ? '' : plural(t.rows, 'row')));
+    }));
+    sync();
+
+    const modal = openModal({
+      title: `Back up ${db.name}`,
+      body: h('div', { class: 'form-stack' },
+        segmented([['rows', 'Tables and rows'], ['schema', 'Tables only']], rows, v => { rows = v; }),
+        h('label', { class: 'check' }, every, h('span', null, h('b', null, 'Every table')), count),
+        list,
+        h('p', { class: 'muted small', style: 'margin:0' },
+          'It reads every table at the same moment, so the rows agree with each other. Restore it into an empty database.')),
+      actions: [h('button', { class: 'btn', onclick: () => modal.close() }, 'Cancel'), ok],
+    });
+    ok.addEventListener('click', async () => {
+      ok.disabled = true;
+      try {
+        const all = picked.size === tables.length;
+        const res = await api('backup', {
+          db: S.db,
+          tables: all ? null : tables.filter(t => picked.has(tableKey(t))).map(tableRef),
+          rows: rows === 'rows',
+        }, true);
+        download(`${db.name}-${new Date().toISOString().slice(0, 10)}.sql`, await res.blob());
+        modal.close();
+        toast('Backup downloaded.', 'ok');
+      } catch (e) {
+        toast(e.message, 'error');
+        ok.disabled = false;
+      }
+    });
+  }
+
+  // How the open database differs from another one of the same system, and
+  // the SQL that makes the open one match. Nothing runs here; the SQL goes to
+  // the SQL tab to be read first.
+  function openCompare() {
+    const here = dbById(S.db);
+    const others = allDbs().filter(d => d.id !== here.id && d.driver === here.driver);
+    if (!others.length) {
+      toast(`There is no other ${here.system} database on the list to compare ${here.name} with.`);
+      return;
+    }
+    const pick = h('select', { class: 'input' }, others.map(d => h('option', { value: d.id }, `${d.name} (${d.where})`)));
+    const last = store.get('compareWith:' + here.id, null);
+    if (others.some(d => d.id === last)) pick.value = last;
+    const out = h('div', { class: 'compare-out' });
+    const go_ = h('button', { class: 'btn primary' }, icon('columns'), 'Compare');
+    const modal = openModal({
+      title: `Compare ${here.name}`,
+      wide: true,
+      body: h('div', { class: 'form-stack' },
+        h('label', { class: 'compare-pick' }, h('span', { class: 'muted' }, 'With'), pick, go_),
+        h('p', { class: 'muted small', style: 'margin:0' }, `The SQL makes ${here.name} like the one you pick. Nothing runs until you run it in the SQL tab.`),
+        out),
+    });
+
+    const list = (title, names) => (names.length
+      ? h('div', { class: 'compare-group' }, h('h4', null, title), h('div', { class: 'compare-names mono' }, names.join(', ')))
+      : null);
+
+    go_.addEventListener('click', async () => {
+      const other = dbById(pick.value);
+      store.set('compareWith:' + here.id, other.id);
+      go_.disabled = true;
+      put(out, h('div', { class: 'muted' }, 'Comparing...'));
+      try {
+        const r = await api('compare', { db: here.id, other: other.id });
+        const differs = r.missing.length || r.extra.length || r.changed.length;
+        if (!differs) {
+          put(out, h('p', { class: 'callout info' }, icon('check'), h('span', null, `${here.name} and ${other.name} have the same tables, columns, indexes, keys and views.`)));
+          return;
+        }
+        // Open in SQL is the next step now, so it takes the one primary button.
+        go_.className = 'btn';
+        const script = [`-- Makes ${here.name} like ${other.name}. Read it before you run it.`, ...r.sql,
+          ...(r.drops.length ? ['', '-- These can throw data away, so they are left as comments. Take out the -- to run one.', ...r.drops] : [])].join('\n');
+        put(out,
+          h('p', { class: 'muted small', style: 'margin:0' },
+            `${plural(r.same, 'table')} the same. `
+            + [r.changed.length ? `${plural(r.changed.length, 'table')} differ` : '', r.missing.length ? `${fmtN(r.missing.length)} only in ${other.name}` : '', r.extra.length ? `${fmtN(r.extra.length)} only in ${here.name}` : '']
+              .filter(Boolean).join(', ') + '.'),
+          list(`Only in ${other.name}`, r.missing),
+          list(`Only in ${here.name}`, r.extra),
+          r.changed.length ? h('div', { class: 'compare-group' }, h('h4', null, 'Different'),
+            h('table', { class: 'compare-table' }, h('tbody', null, r.changed.flatMap(c => c.items.map((it, i) => h('tr', null,
+              h('td', { class: 'mono' }, i === 0 ? c.table : ''),
+              h('td', { class: 'mono' }, it.what),
+              h('td', null, it.change, it.there != null ? h('div', { class: 'faint small mono' }, `${other.name}: ${it.there}`) : null,
+                it.here != null ? h('div', { class: 'faint small mono' }, `${here.name}: ${it.here}`) : null))))))) : null,
+          h('pre', { class: 'compare-sql mono' }, script),
+          h('div', { class: 'modal-actions' },
+            h('button', { class: 'btn', onclick: () => copyText(script, 'SQL copied.') }, icon('copy'), 'Copy SQL'),
+            h('button', {
+              class: 'btn primary',
+              title: `Put the SQL in the SQL tab of ${here.name}, to read and run`,
+              onclick: () => {
+                store.set('sql:' + here.id, script);
+                modal.close();
+                go({ db: here.id, table: null, tab: 'sql', ...fresh });
+              },
+            }, icon('code'), 'Open in SQL')));
+      } catch (e) {
+        put(out, errorBox(e.message));
+      } finally {
+        go_.disabled = false;
+      }
+    });
+  }
+
+  // Runs a backup file into the open database, after saying what will happen.
+  function openRestore() {
+    const db = dbById(S.db);
+    const input = h('input', { type: 'file', accept: '.sql,text/plain,application/sql' });
+    input.addEventListener('change', async () => {
+      const file = input.files[0];
+      if (!file) return;
+      // The statements travel as JSON, a little bigger than the file.
+      const limit = SETTINGS.upload_limit;
+      if (limit && file.size * 1.1 > limit) {
+        toast(`${file.name} is ${fmtBytes(file.size)}, more than this PHP takes in one request (${fmtBytes(limit)}). Raise post_max_size in php.ini, or restore it with the ${isMysql() ? 'mysql' : 'psql'} command line.`, 'error');
+        return;
+      }
+      const statements = DbvSql.statements(await file.text(), { dialect: isMysql() ? 'mysql' : 'pgsql' }).map(s => s.text);
+      if (!statements.length) {
+        toast(`${file.name} has no SQL in it.`, 'error');
+        return;
+      }
+      const have = (S.tables || []).length;
+      const ok = await confirmBox({
+        title: `Restore ${file.name} into ${db.name}?`,
+        body: `${plural(statements.length, 'statement')} run in ${db.name}. `
+          + (isMysql()
+            ? 'MySQL keeps each table as soon as it is made, so if a statement fails, the ones before it may stay.'
+            : 'They run in one transaction: if one fails, nothing is kept.')
+          + (have ? ` ${db.name} has ${plural(have, 'table')} already, and a table in the file that is there already stops the restore.` : ''),
+        confirm: 'Restore',
+      });
+      if (!ok) return;
+      try {
+        const r = await api('restore', { db: S.db, statements });
+        delete schemaCache[S.db];
+        await refresh();
+        toast(`${file.name} is restored: ${plural(r.statements, 'statement')} in ${fmtN(Math.round(r.ms / 100) / 10)} s.`, 'ok');
+      } catch (e) {
+        await refresh();
+        openModal({ title: `${file.name} was not restored`, body: errorBox(e.message), wide: true });
+      }
+    });
+    input.click();
+  }
+
   function newDatabase(copy) {
     const db = dbById(S.db);
     const note = !copy ? `An empty database on ${db.where}.`
@@ -3092,12 +3417,9 @@
     }
 
     g.trs = g.rows.map((_, ri) => rowEl(ri));
-    // Rows just loaded come in one after another. A saved cell never does this.
+    // Rows just loaded fade in, all together. A saved cell never does this.
     if (o.cascade && !reducedMotion()) {
-      g.trs.slice(0, 24).forEach((tr, i) => {
-        tr.classList.add('enter');
-        tr.style.setProperty('--i', i);
-      });
+      g.trs.forEach(tr => tr.classList.add('enter'));
     }
     const tbody = h('tbody', null, g.trs);
 
@@ -3260,7 +3582,7 @@
     writeWidths();
     put(container,
       style,
-      h('table', { class: `grid ${id}` + (o.selectable ? ' has-pick' : '') },
+      h('table', { class: `grid sheet ${id}` + (o.selectable ? ' has-pick' : '') },
         h('thead', null, h('tr', null,
           o.selectable ? h('th', { class: 'pick' }, allBox) : null,
           h('th', { class: 'rownum' }, '#'),
@@ -3321,10 +3643,18 @@
   const NULL_OPTION = '\u0000null';
 
   // Double-click or Enter on a cell. Enter or leaving the cell saves, Esc cancels.
-  function editCell(ri, ci) {
-    if (!S.data) return;
-    const g = S.grid;
-    const meta = S.data.table;
+  // Where a cell is edited: the Browse grid, or a SQL result that reads one
+  // table. row puts a row read back from the table into the grid's own order,
+  // and live says whether the grid still shows these rows.
+  const browseCtx = () => S.data && {
+    source: 'table', db: S.db, table: S.table, meta: S.data.table, rows: S.data.rows, grid: S.grid,
+    row: r => r, live: rows => !!S.data && S.data.rows === rows,
+  };
+
+  function editCell(ri, ci, ctx = browseCtx()) {
+    if (!ctx) return;
+    const g = ctx.grid;
+    const meta = ctx.meta;
     const col = g.cols[ci];
     if (!meta.editable) {
       openRow(ri);
@@ -3338,7 +3668,7 @@
     if (!td || td.querySelector('.cell-editor')) return;
     g.setActive(ri, ci);
 
-    const rows = S.data.rows;
+    const rows = ctx.rows;
     const old = rows[ri][col.i];
     const json = isJson(col);
     const kind = pickerKind(col);
@@ -3422,7 +3752,7 @@
       // An empty box on a NULL cell stays NULL; it does not become an empty string.
       const unchanged = value === first || (value === null && old === null);
       close();
-      if (!unchanged) saveCell(ri, col, value, old, rows);
+      if (!unchanged) saveCell(ri, col, value, old, rows, ctx);
     }
 
     function onKey(e) {
@@ -3472,16 +3802,16 @@
   }
 
   // Delete on a cell: NULL, with Undo in the toast like any other edit.
-  function clearCell(ri, ci) {
-    if (!S.data || !S.data.table.editable) return;
-    const col = S.grid.cols[ci];
-    const old = S.data.rows[ri][col.i];
+  function clearCell(ri, ci, ctx = browseCtx()) {
+    if (!ctx || !ctx.meta.editable) return;
+    const col = ctx.grid.cols[ci];
+    const old = ctx.rows[ri][col.i];
     if (col.readonly || old == null) return;
     if (!col.nullable) {
       toast(`${col.name} cannot be NULL.`);
       return;
     }
-    saveCell(ri, col, null, old, S.data.rows);
+    saveCell(ri, col, null, old, ctx.rows, ctx);
   }
 
   // An empty pasted value means NULL, except in a text column that must have a value.
@@ -3553,24 +3883,24 @@
     }
   }
 
-  async function saveCell(ri, col, value, old, rows) {
-    const meta = S.data.table;
-    const g = S.grid;
+  async function saveCell(ri, col, value, old, rows, ctx = browseCtx()) {
+    const meta = ctx.meta;
+    const g = ctx.grid;
     const ci = g.cols.findIndex(c => c.name === col.name);
     const td = ci >= 0 ? g.cell(ri, ci) : null;
     if (td) td.classList.add('saving');
     try {
-      const res = await api('update', { db: S.db, table: S.table, keys: [keyOf(meta, rows[ri])], changes: { [col.name]: value } });
-      rows[ri] = res.rows[0];
-      if (S.data && S.data.rows === rows) {
-        S.grid.updateRow(ri);
+      const res = await api('update', { db: ctx.db, table: ctx.table, keys: [keyOf(meta, rows[ri])], changes: { [col.name]: value } });
+      rows[ri] = ctx.row(res.rows[0]);
+      if (ctx.live(rows)) {
+        g.updateRow(ri);
         const d = S.drawer;
-        if (d && d.source === 'table' && d.index === ri && d.mode === 'view') {
+        if (ctx.source === 'table' && d && d.source === 'table' && d.index === ri && d.mode === 'view') {
           d.row = rows[ri];
           renderDrawer();
         }
       }
-      toast(`${col.name} saved.`, 'ok', { label: 'Undo', run: () => saveCell(ri, col, old, value, rows) });
+      toast(`${col.name} saved.`, 'ok', { label: 'Undo', run: () => saveCell(ri, col, old, value, rows, ctx) });
     } catch (e) {
       if (td) td.classList.remove('saving');
       toast(e.message, 'error');
@@ -4738,6 +5068,74 @@
       h('span', { class: 'bar-value' }, format(total(r))))));
   }
 
+  // A line through the rows of a query result, in their order, with the
+  // value and label of the row under the pointer. points are { label, value },
+  // value null for a gap.
+  function resultLine(points, format) {
+    const H = 240;
+    const PAD = { l: 56, r: 14, t: 10, b: 24 };
+    const svg = svgEl('svg', { class: 'chart-svg', height: H });
+    const tipBox = h('div', { class: 'chart-tip', hidden: true });
+    const plot = h('div', { class: 'chart-plot' }, svg, tipBox);
+    let hover = null;
+
+    function draw() {
+      const w = plot.clientWidth;
+      if (!w) return;
+      svg.setAttribute('width', w);
+      const values = points.map(p => p.value).filter(v => v != null);
+      const lo = Math.min(0, ...values);
+      const hi = Math.max(lo + 1, niceMax(Math.max(...values, 0)));
+      const x = i => PAD.l + (points.length < 2 ? 0.5 : i / (points.length - 1)) * (w - PAD.l - PAD.r);
+      const y = v => H - PAD.b - ((v - lo) / (hi - lo)) * (H - PAD.t - PAD.b);
+      const kids = [];
+      for (const v of [lo, (lo + hi) / 2, hi]) {
+        kids.push(svgEl('line', { class: 'chart-grid', x1: PAD.l, x2: w - PAD.r, y1: y(v), y2: y(v) }));
+        const label = svgEl('text', { class: 'chart-axis', x: PAD.l - 8, y: y(v) + 4, 'text-anchor': 'end' });
+        label.textContent = format(v);
+        kids.push(label);
+      }
+      [[0, 'start'], [points.length - 1, 'end']].forEach(([i, anchor]) => {
+        if (!points[i] || (i === 0 && points.length === 1 && anchor === 'end')) return;
+        const label = svgEl('text', { class: 'chart-axis', x: x(i), y: H - 4, 'text-anchor': anchor });
+        label.textContent = short(points[i].label);
+        kids.push(label);
+      });
+      let d = '';
+      let pen = false;
+      points.forEach((p, i) => {
+        if (p.value == null) { pen = false; return; }
+        d += `${pen ? 'L' : 'M'}${x(i).toFixed(1)} ${y(p.value).toFixed(1)}`;
+        pen = true;
+      });
+      if (d) kids.push(svgEl('path', { class: 'chart-line s1', d }));
+      const p = hover != null ? points[hover] : null;
+      if (p && p.value != null) {
+        kids.push(svgEl('line', { class: 'chart-cross', x1: x(hover), x2: x(hover), y1: PAD.t, y2: H - PAD.b }));
+        kids.push(svgEl('circle', { class: 'chart-dot s1', cx: x(hover), cy: y(p.value), r: 4 }));
+        put(tipBox, h('div', { class: 'muted' }, p.label), h('b', null, format(p.value)));
+        tipBox.hidden = false;
+        const left = x(hover) + 12;
+        tipBox.style.left = (left + tipBox.offsetWidth > w ? x(hover) - tipBox.offsetWidth - 12 : left) + 'px';
+      } else {
+        tipBox.hidden = true;
+      }
+      svg.replaceChildren(...kids);
+    }
+
+    plot.addEventListener('mousemove', e => {
+      const box = plot.getBoundingClientRect();
+      const span = box.width - PAD.l - PAD.r;
+      const at = points.length < 2 ? 0 : Math.round(((e.clientX - box.left - PAD.l) / span) * (points.length - 1));
+      const next = clamp(at, 0, points.length - 1);
+      if (next !== hover) { hover = next; draw(); }
+    });
+    plot.addEventListener('mouseleave', () => { hover = null; draw(); });
+    new ResizeObserver(draw).observe(plot);
+    requestAnimationFrame(draw);
+    return plot;
+  }
+
   // A line chart over a window of time, drawn again on each update, with a
   // crosshair and the numbers of the moment under the pointer. update() takes
   // points of { at, values }, one value per series, null for a gap.
@@ -5101,20 +5499,23 @@
   // The SQL box: CodeMirror when it is loaded, with colours, line numbers,
   // bracket matching and suggestions of this database's tables and columns;
   // a plain textarea otherwise. Both answer to the same few calls.
-  function sqlEditor(value, onChange, onRun) {
+  // keys maps a shortcut action to what it does: run, runOne, format.
+  function sqlEditor(value, onChange, keys) {
     const ta = h('textarea', {
       class: 'sql-editor',
       spellcheck: false,
-      placeholder: `select * from users limit 50;\n\n${keyLabel('run')} runs the query, or only the part you selected.`,
+      placeholder: `select * from users limit 50;\n\n${keyLabel('run')} runs the query, or only the part you selected. ${keyLabel('runOne')} runs only the statement the cursor is in.`,
       value,
     });
+    const command = e => Object.keys(keys).find(k => pressed(e, k));
 
     if (!window.CodeMirror) {
       ta.addEventListener('input', () => onChange(ta.value));
       ta.addEventListener('keydown', e => {
-        if (pressed(e, 'run')) {
+        const k = command(e);
+        if (k) {
           e.preventDefault();
-          onRun();
+          keys[k]();
         } else if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey) {
           e.preventDefault();
           ta.setRangeText('  ', ta.selectionStart, ta.selectionEnd, 'end');
@@ -5126,7 +5527,11 @@
         start: () => ta.focus(),
         get: () => ta.value,
         selected: () => ta.value.slice(ta.selectionStart, ta.selectionEnd),
+        cursor: () => ta.selectionStart,
+        // Shows which part ran by selecting it.
+        mark: (from, to) => { ta.focus(); ta.setSelectionRange(from, to); },
         set: v => { ta.value = v; onChange(v); ta.focus(); },
+        replace: v => { ta.value = v; onChange(v); ta.focus(); },
       };
     }
 
@@ -5154,10 +5559,11 @@
         });
         // The shortcuts can change while the editor is open, so each key is checked as it comes.
         cm.on('keydown', (c, e) => {
-          const command = pressed(e, 'run') ? onRun : pressed(e, 'suggest') ? () => c.showHint() : pressed(e, 'comment') ? () => c.toggleComment() : null;
-          if (!command) return;
+          const k = command(e);
+          const run = k ? keys[k] : pressed(e, 'suggest') ? () => c.showHint() : pressed(e, 'comment') ? () => c.toggleComment() : null;
+          if (!run) return;
           e.preventDefault();
-          command();
+          run();
         });
         cm.on('change', () => onChange(cm.getValue()));
         // Suggestions open by themselves after two letters of a name, or after "table." for its columns.
@@ -5176,7 +5582,20 @@
       },
       get: () => cm.getValue(),
       selected: () => cm.getSelection(),
+      cursor: () => cm.indexFromPos(cm.getCursor()),
+      // Lights up the part that ran for a moment.
+      mark: (from, to) => {
+        const m = cm.markText(cm.posFromIndex(from), cm.posFromIndex(to), { className: 'cm-ran' });
+        setTimeout(() => m.clear(), 700);
+      },
       set: v => { cm.setValue(v); toEnd(); },
+      // A change Ctrl+Z can undo, unlike set, with the cursor kept near where it was.
+      replace: v => {
+        const at = cm.getCursor();
+        cm.replaceRange(v, { line: 0, ch: 0 }, { line: cm.lastLine() });
+        cm.setCursor(at);
+        cm.focus();
+      },
     };
   }
 
@@ -5190,22 +5609,45 @@
     const key = 'sql:' + S.db;
     const starter = S.table ? `select *\nfrom ${qualified(S.table)}\nlimit 100;` : '';
     const saveText = debounce(value => store.set(key, value), 300);
-    const editor = sqlEditor(store.get(key, starter), saveText, () => run(false));
+    const dialect = { dialect: isMysql() ? 'mysql' : 'pgsql' };
+    const editor = sqlEditor(store.get(key, starter), saveText, {
+      run: () => run(false),
+      runOne: () => run(false, true),
+      format: () => tidy(),
+    });
     const writes = h('input', { type: 'checkbox', onchange: e => toggle.classList.toggle('on', e.target.checked) });
     const toggle = h('label', { class: 'switch', title: 'Off: the query runs read only and the database refuses any change. On: changes are kept.' },
       writes, h('span', { class: 'track' }), 'Allow changes');
     const result = h('div', { class: 'sql-result' },
       h('div', { class: 'empty' }, `Rows show up here. ${keyLabel('run')} runs the query, or only the part you selected.`));
 
-    async function run(explain) {
+    // What to run: the selection, else with one the statement the cursor is
+    // in, else everything. Explain takes one statement, so it picks the same way.
+    function pick(one) {
       const part = editor.selected();
-      const sql = (part.trim() ? part : editor.get()).trim();
+      if (part.trim()) return part.trim();
+      const all = editor.get();
+      if (!one) return all.trim();
+      const s = DbvSql.statementAt(all, editor.cursor(), dialect);
+      if (s) editor.mark(s.from, s.to);
+      return s ? s.text : '';
+    }
+
+    function tidy() {
+      const text = editor.get();
+      if (!text.trim()) return;
+      const neat = DbvSql.format(text, dialect);
+      if (neat !== text) editor.replace(neat);
+    }
+
+    async function run(explain, one = explain) {
+      const sql = pick(one);
       if (!sql) return;
       pushHistory(sql);
       result.classList.add('loading');
       try {
         const r = await api('sql', { db: S.db, sql, explain, write: writes.checked && !explain });
-        renderSqlResult(result, r);
+        await renderSqlResult(result, r, explain ? null : await sqlTarget(sql, r, dialect));
         if (r.committed || r.ended) loadTables();
       } catch (e) {
         put(result, errorBox(e.message));
@@ -5215,24 +5657,152 @@
     }
 
     const historyBtn = h('button', { class: 'btn', onclick: () => openHistory(historyBtn, editor) }, icon('history'), 'History');
+    const savedBtn = h('button', { class: 'btn', title: 'Save this query, open a saved one, or use a .sql file', onclick: () => openSaved(savedBtn, editor) },
+      icon('list'), 'Saved', icon('down', 'chev'));
 
     put(UI.view, h('div', { class: 'sql-view' },
       editor.el,
       h('div', { class: 'toolbar' },
-        h('button', { class: 'btn primary', onclick: () => run(false) }, icon('play'), 'Run', kbdFor('run')),
-        h('button', { class: 'btn', title: 'Show how the database runs it. Always read only.', onclick: () => run(true) }, icon('gauge'), 'Explain'),
+        h('button', { class: 'btn primary', title: withKey('Run the SQL, or only the part selected', 'run'), onclick: () => run(false) }, icon('play'), 'Run', kbdFor('run')),
+        h('button', { class: 'btn', title: withKey('Run only the statement the cursor is in', 'runOne'), onclick: () => run(false, true) }, 'Run statement'),
+        h('button', { class: 'btn', title: 'Show how the database runs the statement the cursor is in. Always read only.', onclick: () => run(true) }, icon('gauge'), 'Explain'),
         toggle,
         h('div', { class: 'spacer' }),
         S.table ? h('button', {
           class: 'btn', title: `Put a select from ${S.table.name} in the editor`,
           onclick: () => editor.set(starter),
         }, icon('table'), `From ${S.table.name}`) : null,
+        h('button', { class: 'btn', title: withKey('Lay out the SQL neatly. Only spaces and line breaks change.', 'format'), onclick: tidy }, 'Format'),
+        savedBtn,
         historyBtn),
       result));
     editor.start();
   }
 
-  function renderSqlResult(box, r) {
+  // Saved queries, by database, in this browser. A .sql file takes them anywhere else.
+  function openSaved(anchor, editor) {
+    const db = dbById(S.db);
+    const key = 'saved:' + S.db;
+    const box = h('div', { class: 'menu history-menu' });
+    // Putting other SQL in the editor offers Undo, so nothing typed is lost.
+    const load = (sql, message) => {
+      const before = editor.get();
+      closePopover();
+      editor.set(sql);
+      toast(message, 'ok', before.trim() && before !== sql ? { label: 'Undo', run: () => editor.set(before) } : null);
+    };
+    const save = async () => {
+      closePopover();
+      const sql = editor.get().trim();
+      if (!sql) { toast('Write a query first.', 'error'); return; }
+      const name = await askText({ title: 'Save query', confirm: 'Save query' });
+      if (!name) return;
+      const list = store.get(key, []);
+      const replaced = list.some(q => q.name === name);
+      store.set(key, [{ name, sql, at: Date.now() }, ...list.filter(q => q.name !== name)]);
+      toast(replaced ? `${name} is saved, in place of the old one.` : `${name} is saved.`, 'ok');
+    };
+    const remove = q => {
+      store.set(key, store.get(key, []).filter(x => x.name !== q.name));
+      draw();
+      toast(`${q.name} deleted.`, 'ok', { label: 'Undo', run: () => store.set(key, [q, ...store.get(key, [])]) });
+    };
+    const openFile = () => {
+      const input = h('input', { type: 'file', accept: '.sql,text/plain,application/sql' });
+      input.addEventListener('change', async () => {
+        const file = input.files[0];
+        if (file) load(await file.text(), `${file.name} is in the editor.`);
+      });
+      closePopover();
+      input.click();
+    };
+    const item = (ic, label, run, hint = null) => h('button', { class: 'menu-item', title: hint, onclick: run }, icon(ic), h('span', { class: 'grow' }, label));
+
+    function draw() {
+      const list = store.get(key, []);
+      put(box,
+        item('plus', 'Save this query', save),
+        item('upload', 'Open a .sql file', openFile),
+        item('download', 'Download as a .sql file', () => {
+          closePopover();
+          if (!editor.get().trim()) { toast('Write a query first.', 'error'); return; }
+          download(`${db.name}.sql`, editor.get(), 'application/sql');
+        }),
+        h('div', { class: 'menu-sep' }),
+        list.length
+          ? list.map(q => h('div', { class: 'saved-item' },
+            h('button', { class: 'history-item', title: q.sql, onclick: () => load(q.sql, `${q.name} is in the editor.`) },
+              h('b', null, q.name), h('code', null, q.sql.replace(/\s+/g, ' ')), h('small', null, timeAgo(q.at))),
+            h('button', { class: 'btn ghost icon-only', title: `Delete ${q.name}`, onclick: () => remove(q) }, icon('x'))))
+          : h('div', { class: 'empty' }, `Queries you save for ${db.name} show up here.`));
+    }
+    draw();
+    openPopover(anchor, box, { alignRight: true });
+  }
+
+  // A query result as bars or a line: one column names each row, a number
+  // column gives its size. Many rows are cut to the first CHART_ROWS.
+  const CHART_ROWS = 200;
+  function resultChart(r, numbers) {
+    const all = r.columns.map((c, i) => ({ name: c.name, i }));
+    const pick = store.get('sqlChart', {});
+    let value = numbers.find(c => c.name === pick.value) || numbers[numbers.length - 1];
+    let label = all.find(c => c.name === pick.label && c.i !== value.i) || all.find(c => c.i !== value.i) || null;
+    let kind = pick.kind === 'line' ? 'line' : 'bars';
+    const body = h('div', { class: 'result-chart-body' });
+    const remember = () => store.set('sqlChart', { value: value.name, label: label && label.name, kind });
+    const choose = (list, current, onPick, none = null) => {
+      const s = h('select', { class: 'input', onchange: e => { onPick(e.target.value); remember(); draw(); } },
+        none ? h('option', { value: '' }, none) : null,
+        list.map(c => h('option', { value: String(c.i) }, c.name)));
+      s.value = current ? String(current.i) : '';
+      return s;
+    };
+    const rows = r.rows.slice(0, CHART_ROWS);
+    const num = v => (v == null || v === '' || Number.isNaN(Number(v)) ? null : Number(v));
+    const name = (row, i) => (label ? (row[label.i] == null ? 'NULL' : String(row[label.i])) : `Row ${i + 1}`);
+
+    function draw() {
+      const points = rows.map((row, i) => ({ label: name(row, i), value: num(row[value.i]) }));
+      put(body, kind === 'line'
+        ? resultLine(points, fmtN)
+        : barChart([{ label: value.name, cls: 's1' }], points.map(p => ({ label: p.label, values: [p.value ?? 0] })), fmtN));
+    }
+
+    const el = h('div', { class: 'result-chart', hidden: true },
+      h('div', { class: 'toolbar' },
+        h('label', { class: 'muted small' }, 'Name', choose(all, label, v => { label = all.find(c => String(c.i) === v) || null; }, 'Row number')),
+        h('label', { class: 'muted small' }, 'Value', choose(numbers, value, v => { value = numbers.find(c => String(c.i) === v); })),
+        segmented([['bars', 'Bars'], ['line', 'Line']], kind, v => { kind = v; remember(); draw(); }),
+        r.rows.length > CHART_ROWS ? h('span', { class: 'faint' }, `The first ${fmtN(CHART_ROWS)} rows are shown.`) : null),
+      body);
+    return { el, draw };
+  }
+
+  // The table a result can be edited in: a plain select from one table whose
+  // result holds its primary key, and each column once. null for anything else.
+  async function sqlTarget(sql, r, dialect) {
+    const src = DbvSql.editableSource(sql, dialect);
+    if (!src || !r.columns.length || !r.rows.length || !S.tables) return null;
+    const schema = src.schema || homeSchema();
+    const t = S.tables.find(x => x.schema === schema && x.name === src.name);
+    if (!t || !isRealTable(t)) return null;
+    try {
+      const { table: meta } = await api('structure', { db: S.db, table: tableRef(t) }, false, true);
+      const names = r.columns.map(c => c.name);
+      if (!meta.editable || new Set(names).size !== names.length || !meta.pk.every(k => names.includes(k))) return null;
+      const cols = names.map((n, i) => {
+        const c = meta.columns.find(x => x.name === n);
+        // A binary value comes back raw here, so it is not edited as text.
+        return c && { ...c, i, readonly: c.readonly || c.category === 'binary' };
+      });
+      return cols.every(Boolean) ? { t, meta, cols } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function renderSqlResult(box, r, target = null) {
     const count = r.rows.length;
     const status = h('div', { class: 'sql-status' },
       r.columns.length
@@ -5245,7 +5815,8 @@
           title: 'The script ran its own COMMIT or ROLLBACK, or a statement that commits by itself, such as CREATE TABLE on MySQL. The script decided what was kept.',
         }, 'the script ended the transaction')
         : r.committed ? h('span', { class: 'tag danger' }, 'changes kept') : h('span', { class: 'tag' }, 'read only'),
-      r.columns.length && !r.plan ? h('span', { class: 'faint hint' }, 'Right-click a cell to copy.') : null);
+      target ? h('span', { class: 'faint hint' }, `Double-click a cell to change it in ${target.t.name}.`)
+        : r.columns.length && !r.plan ? h('span', { class: 'faint hint' }, 'Right-click a cell to copy.') : null);
 
     if (!r.columns.length) {
       put(box, status);
@@ -5256,19 +5827,41 @@
       put(box, status, h('pre', { class: 'plan' }, r.rows.map(x => x[0]).join('\n')));
       return;
     }
-    const cols = r.columns.map((c, i) => ({ name: c.name, i, category: c.numeric ? 'number' : '' }));
-    const meta = { columns: cols, pk: [], fks: [], refs: [], editable: false };
+    const cols = target ? target.cols : r.columns.map((c, i) => ({ name: c.name, i, category: c.numeric ? 'number' : '' }));
+    const meta = target
+      ? { ...target.meta, columns: cols }
+      : { columns: cols, pk: [], fks: [], refs: [], editable: false };
     const wrap = h('div', { class: 'grid-wrap' });
     const open = i => {
-      S.drawer = { mode: 'view', source: 'sql', meta, index: i, row: r.rows[i], rows: r.rows };
+      S.drawer = { mode: 'view', source: 'sql', meta: { ...meta, editable: false }, index: i, row: r.rows[i], rows: r.rows };
       renderDrawer();
     };
-    put(box, status, wrap);
-    createGrid(wrap, {
+    // A row read back from the table has every column in table order; the result has its own.
+    const at = target ? cols.map(c => target.meta.columns.findIndex(x => x.name === c.name)) : [];
+    const ctx = target && {
+      source: 'sql', db: S.db, table: tableRef(target.t), meta, rows: r.rows, grid: null,
+      row: full => at.map(j => full[j]), live: rows => rows === r.rows && wrap.isConnected,
+    };
+    // A result with a number column can also show as a chart. The choice is remembered.
+    const numbers = r.columns.map((c, i) => ({ name: c.name, i })).filter(c => r.columns[c.i].numeric);
+    const chart = numbers.length && r.rows.length ? resultChart(r, numbers) : null;
+    if (chart) {
+      const show = v => { wrap.hidden = v === 'chart'; chart.el.hidden = v !== 'chart'; if (v === 'chart') chart.draw(); };
+      status.append(segmented([['table', 'Table'], ['chart', 'Chart', 'Show the result as a chart']], store.get('sqlView', 'table'), v => {
+        store.set('sqlView', v);
+        show(v);
+      }, 'result-switch'));
+      requestAnimationFrame(() => show(store.get('sqlView', 'table')));
+    }
+    put(box, status, wrap, chart ? chart.el : null);
+    const grid = createGrid(wrap, {
       cols,
       rows: r.rows,
+      pk: target ? new Set(target.meta.pk) : undefined,
       selectable: true,
       onOpen: open,
+      onEdit: ctx ? (ri, ci) => editCell(ri, ci, ctx) : undefined,
+      onClear: ctx ? (ri, ci) => clearCell(ri, ci, ctx) : undefined,
       cascade: true,
       onCopy: copyFromGrid,
       onCellMenu: (e, ri, ci, g) => {
@@ -5277,6 +5870,7 @@
         const many = g.selected.size > 1 && g.selected.has(ri) ? [...g.selected].sort((a, b) => a - b) : [ri];
         openMenuAt(e, [
           { title: many.length > 1 ? `${plural(many.length, 'row')} selected` : `${c.name}: ${v == null ? 'NULL' : short(v)}` },
+          ctx && many.length === 1 ? { label: 'Edit this cell', icon: 'edit', kbd: keyLabel('edit'), disabled: c.readonly, run: () => editCell(ri, ci, ctx) } : null,
           { label: 'Copy value', icon: 'copy', kbd: keyLabel('copy'), run: () => copyText(v ?? '', 'Value copied.') },
           rowActions('copy', many.map(i => r.rows[i]), g.cols, g.cols, null),
           'sep',
@@ -5286,6 +5880,7 @@
       },
       empty: 'The query returned no rows.',
     });
+    if (ctx) ctx.grid = grid;
   }
 
   function openHistory(anchor, editor) {

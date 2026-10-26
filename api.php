@@ -37,14 +37,41 @@ try {
         dbv_send(['ok' => true]);
     }
 
+    // An unlock of a protected database lasts a while, for this sign-in only,
+    // so it lives in the session. These two write it before it is released.
+    if ($action === 'unlock' || $action === 'lock') {
+        $id = (string) ($req['db'] ?? '');
+        [, $name] = dbv_find($id);
+
+        if ($action === 'lock') {
+            unset($_SESSION['dbv_unlocked'][$id]);
+            dbv_send(['ok' => true]);
+        }
+
+        if (trim((string) ($req['name'] ?? '')) !== $name) {
+            throw new DbvError("Type {$name} exactly to unlock it.");
+        }
+
+        $_SESSION['dbv_unlocked'][$id] = time() + DBV_UNLOCK_SECONDS;
+        dbv_send(['until' => $_SESSION['dbv_unlocked'][$id]]);
+    }
+
+    $unlocked = array_filter((array) ($_SESSION['dbv_unlocked'] ?? []), fn ($until) => $until > time());
+
     // Release the session file, so the page's requests run side by side instead of one at a time.
     session_write_close();
 
     if ($action === 'databases') {
-        dbv_send(['groups' => dbv_database_groups(), 'settings' => dbv_settings(), 'layout' => dbv_layout()]);
+        $left = (object) array_map(fn ($until) => $until - time(), $unlocked);
+        dbv_send(['groups' => dbv_database_groups(), 'settings' => dbv_settings(), 'layout' => dbv_layout(), 'unlocked' => $left]);
+    }
+
+    if (dbv_is_write($action, $req)) {
+        dbv_check_protected((string) ($req['db'] ?? ''), $unlocked);
     }
 
     if ($action === 'layout') {
+        dbv_check_unprotect((array) ($req['layout'] ?? []), $unlocked);
         dbv_send(['layout' => dbv_save_layout((array) ($req['layout'] ?? []))]);
     }
 
@@ -96,6 +123,10 @@ try {
         'health' => dbv_action_health($d),
         'activity' => dbv_action_activity($d),
         'stop' => dbv_action_stop($d, $req),
+        'cancel' => dbv_action_cancel($d, $req),
+        'backup' => dbv_action_backup($d, dbv_find((string) $req['db'])[1], $req),
+        'restore' => dbv_action_restore($d, $req),
+        'compare' => dbv_action_compare($d, dbv_find((string) $req['db'])[1], $req),
         default => throw new DbvError('Unknown action.'),
     });
 } catch (DbvError $e) {

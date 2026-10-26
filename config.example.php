@@ -29,6 +29,11 @@ if (($env['PGSQL_HOST'] ?? '') !== '') {
         // 'only' => ['shop*'],
         'hide' => ['postgres'],
 
+        // Optional. Databases whose name matches are protected: they refuse
+        // every change until you type the name to unlock them for 15 minutes.
+        // You can also protect a database from the list in the page.
+        // 'protect' => ['*prod*', '*live'],
+
         // Optional. How the databases show in the list, by name. The first
         // rule that matches wins, and databases a rule names come first, in
         // this order. "group" puts them under a heading of their own, {1} is
@@ -73,6 +78,14 @@ return [
 
     // One import takes at most this many rows, all in one transaction.
     // 'import_row_limit' => 5000,
+
+    // A table this big, by the database's own estimate, shows that estimate
+    // instead of being counted, unless a search or filter narrows it.
+    // 'count_limit' => 1000000,
+
+    // Counting the rows that match stops after this many seconds. The rows
+    // still show, and the total says "many".
+    // 'count_seconds' => 3,
 
     // A foreign key's search shows these columns of the row it points at,
     // the first two the table has.

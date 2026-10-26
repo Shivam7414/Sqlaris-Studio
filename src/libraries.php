@@ -51,12 +51,12 @@ const LIBRARIES = [
     ],
 ];
 
-// Inter for the page, JetBrains Mono for values and SQL. Latin and the
+// Geist for the page, JetBrains Mono for values and SQL. Latin and the
 // accented Latin letters; other scripts, such as Chinese, use the system font.
 const FONTS = [
-    'inter' => [
-        'package' => '@fontsource-variable/inter@5.3.0',
-        'files' => ['latin' => 'files/inter-latin-wght-normal.woff2', 'latin-ext' => 'files/inter-latin-ext-wght-normal.woff2'],
+    'geist' => [
+        'package' => '@fontsource-variable/geist@5.3.0',
+        'files' => ['latin' => 'files/geist-latin-wght-normal.woff2', 'latin-ext' => 'files/geist-latin-ext-wght-normal.woff2'],
     ],
     'jetbrains-mono' => [
         'package' => '@fontsource-variable/jetbrains-mono@5.3.0',

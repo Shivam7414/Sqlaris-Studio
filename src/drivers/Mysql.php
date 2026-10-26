@@ -209,11 +209,14 @@ final class DbvMysql extends DbvDriver
             from information_schema.key_column_usage
             where table_schema = ? and table_name = ? order by constraint_name, ordinal_position', [$schema, $name]);
 
+        // Only keys from tables in this same database. Without table_schema,
+        // MariaDB opens every table on the server to answer, which took a
+        // second on a server with 2,000 tables, on every page of rows.
         $refs = dbv_all($this->pdo,
             'select constraint_name as name, table_schema as ref_schema, table_name as ref_table, column_name as col, referenced_column_name as ref_col
             from information_schema.key_column_usage
-            where referenced_table_schema = ? and referenced_table_name = ?
-            order by table_name, constraint_name, ordinal_position', [$schema, $name]);
+            where table_schema = ? and referenced_table_schema = ? and referenced_table_name = ?
+            order by table_name, constraint_name, ordinal_position', [$schema, $schema, $name]);
 
         return [
             'schema' => $schema,
@@ -291,11 +294,11 @@ final class DbvMysql extends DbvDriver
         $indexes = [];
 
         foreach (dbv_all($this->pdo,
-            "select index_name as name, non_unique as non_unique, column_name as col, sub_part as sub_part, index_type as type
-            from information_schema.statistics where table_schema = ? and table_name = ?
+            "select index_name as name, non_unique as non_unique, column_name as col, sub_part as sub_part, index_type as type, s.*
+            from information_schema.statistics s where table_schema = ? and table_name = ?
             order by index_name = 'PRIMARY' desc, index_name, seq_in_index", $params) as $row) {
             $indexes[$row['name']] ??= ['name' => $row['name'], 'unique' => ! $row['non_unique'], 'type' => $row['type'], 'cols' => []];
-            $indexes[$row['name']]['cols'][] = $this->quote($row['col']).($row['sub_part'] === null ? '' : "({$row['sub_part']})");
+            $indexes[$row['name']]['cols'][] = $this->indexPart($row);
         }
 
         $keys = [];
@@ -830,6 +833,222 @@ final class DbvMysql extends DbvDriver
         }
 
         $this->pdo->exec(($kill ? 'kill ' : 'kill query ').$id);
+    }
+
+    public function backupSchema(array $tables, array $views): array
+    {
+        $create = fn (array $t, string $what): string => (string) array_values(
+            $this->pdo->query('show create '.$what.' '.$this->tableName($t))->fetch(PDO::FETCH_ASSOC))[1];
+        // A view names its tables with this database in front, which would tie
+        // the backup to this name. Without it, the backup goes into any database.
+        $here = $this->quote($this->database).'.';
+        $definitions = [];
+
+        foreach ($views as $v) {
+            $sql = str_replace($here, '', $create($v, 'view'));
+            $definitions[$v['name']] = preg_replace('/ DEFINER=`(?:[^`]|``)*`@`(?:[^`]|``)*`/', '', $sql);
+        }
+
+        return [
+            'head' => [
+                'set names utf8mb4;',
+                // The times were read in UTC, so they go back in UTC.
+                "set time_zone = '+00:00';",
+                // Tables can come in any order, and a key whose table comes later still works.
+                'set foreign_key_checks = 0;',
+                // An id of 0 stays 0 instead of taking the next number.
+                "set session sql_mode = if(@@sql_mode = '', 'NO_AUTO_VALUE_ON_ZERO', concat(@@sql_mode, ',NO_AUTO_VALUE_ON_ZERO'));",
+            ],
+            'tables' => array_combine(
+                array_map(fn ($t) => "{$t['schema']}.{$t['name']}", $tables),
+                array_map(fn ($t) => $create($t, 'table').';', $tables)),
+            'tail' => [...array_map(fn ($sql) => $sql.';', $this->viewOrder($definitions)), 'set foreign_key_checks = 1;'],
+            'left_out' => ['triggers', 'stored procedures and functions', 'events', 'users and grants'],
+        ];
+    }
+
+    /**
+     * Views in an order where each comes after the views it reads.
+     *
+     * @param  array<string, string>  $definitions
+     * @return list<string>
+     */
+    private function viewOrder(array $definitions): array
+    {
+        $done = [];
+        $visit = function (string $name, array $path) use (&$visit, &$done, $definitions): void {
+            if (isset($done[$name]) || isset($path[$name])) {
+                return;
+            }
+
+            foreach (array_keys($definitions) as $other) {
+                if ($other !== $name && str_contains($definitions[$name], $this->quote($other))) {
+                    $visit($other, $path + [$name => true]);
+                }
+            }
+
+            $done[$name] = $definitions[$name];
+        };
+
+        foreach (array_keys($definitions) as $name) {
+            $visit($name, []);
+        }
+
+        return array_values($done);
+    }
+
+    /** One part of an index: a column, with its prefix length, or on MySQL 8 an expression, which has no column. */
+    private function indexPart(array $row): string
+    {
+        if ($row['col'] === null) {
+            return '('.($row['EXPRESSION'] ?? $row['expression'] ?? '').')';
+        }
+
+        return $this->quote($row['col']).($row['sub_part'] === null ? '' : "({$row['sub_part']})");
+    }
+
+    public function keys(array $t): array
+    {
+        $params = [$t['schema'], $t['name']];
+        $keys = [];
+
+        foreach (dbv_all($this->pdo,
+            "select index_name as name, non_unique, column_name as col, sub_part, index_type as type, s.*
+            from information_schema.statistics s where table_schema = ? and table_name = ? and index_name <> 'PRIMARY'
+            order by index_name, seq_in_index", $params) as $row) {
+            $kind = in_array($row['type'], ['FULLTEXT', 'SPATIAL'], true) ? strtolower($row['type']).' index' : ($row['non_unique'] ? 'index' : 'unique index');
+            $keys[$row['name']] ??= ['kind' => $kind, 'cols' => []];
+            $keys[$row['name']]['cols'][] = $this->indexPart($row);
+        }
+
+        foreach ($keys as $name => $key) {
+            $keys[$name] = ['kind' => $key['kind'], 'def' => '('.implode(', ', $key['cols']).')'];
+        }
+
+        // A foreign key names the table it points to without the database, so it reads the same in another one.
+        $fks = [];
+
+        // Two lookups, each by schema and table: joined, MariaDB reads every database on the server.
+        $rules = [];
+
+        foreach (dbv_all($this->pdo,
+            'select constraint_name as name, update_rule, delete_rule from information_schema.referential_constraints
+            where constraint_schema = ? and table_name = ?', $params) as $row) {
+            $rules[$row['name']] = " on delete {$row['delete_rule']} on update {$row['update_rule']}";
+        }
+
+        foreach (dbv_all($this->pdo,
+            'select constraint_name as name, column_name as col, referenced_table_name as ref, referenced_column_name as ref_col
+            from information_schema.key_column_usage
+            where table_schema = ? and table_name = ? and referenced_table_name is not null
+            order by constraint_name, ordinal_position', $params) as $row) {
+            $fks[$row['name']] ??= ['cols' => [], 'refs' => [], 'ref' => $row['ref'], 'rules' => $rules[$row['name']] ?? ''];
+            $fks[$row['name']]['cols'][] = $this->quote($row['col']);
+            $fks[$row['name']]['refs'][] = $this->quote($row['ref_col']);
+        }
+
+        foreach ($fks as $name => $fk) {
+            $keys[$name] = ['kind' => 'foreign key', 'def' => 'foreign key ('.implode(', ', $fk['cols']).') references '.$this->quote($fk['ref'])
+                .' ('.implode(', ', $fk['refs']).')'.strtolower($fk['rules'])];
+        }
+
+        foreach ($this->checks($t['schema'], $t['name']) as $check) {
+            // MariaDB's own check that a JSON column holds JSON comes with the column.
+            if (! preg_match('/^json_valid\(`(?:[^`]|``)+`\)$/i', trim($check['def']))) {
+                $keys[$check['name']] = ['kind' => 'check', 'def' => 'check ('.trim($check['def']).')'];
+            }
+        }
+
+        ksort($keys);
+
+        return $keys;
+    }
+
+    public function keySql(array $t, string $name, array $key, bool $add): string
+    {
+        $alter = 'alter table '.$this->tableName($t).' ';
+        $n = $this->quote($name);
+
+        return match (true) {
+            str_ends_with($key['kind'], 'index') => $alter.($add ? "add {$key['kind']} {$n} {$key['def']}" : "drop index {$n}"),
+            $key['kind'] === 'foreign key' => $alter.($add ? "add constraint {$n} {$key['def']}" : "drop foreign key {$n}"),
+            default => $alter.($add ? "add constraint {$n} {$key['def']}" : "drop constraint {$n}"),
+        }.';';
+    }
+
+    public function dumpValue(string $expr, array $column): string
+    {
+        return match (true) {
+            $column['category'] === 'binary', in_array($column['native'], self::SHAPES, true) => "hex({$expr})",
+            $column['native'] === 'bit' => "cast({$expr} as unsigned)",
+            default => "cast({$expr} as char)",
+        };
+    }
+
+    public function dumpLiteral(?string $value, array $column): string
+    {
+        if ($value === null) {
+            return 'null';
+        }
+
+        // Read as hex, so it goes back as 0x... and lands byte for byte.
+        if ($column['category'] === 'binary' || in_array($column['native'], self::SHAPES, true)) {
+            return $value === '' ? "''" : '0x'.(ctype_xdigit($value) ? $value : bin2hex($value));
+        }
+
+        return $column['native'] === 'bit' ? (string) (int) $value : $this->pdo->quote($value);
+    }
+
+    public function snapshot(): void
+    {
+        $this->pdo->exec('start transaction with consistent snapshot, read only');
+    }
+
+    public function stream(string $sql): iterable
+    {
+        // Unbuffered, rows come from the server as they are read, not all at once.
+        $buffered = class_exists('Pdo\Mysql') ? Pdo\Mysql::ATTR_USE_BUFFERED_QUERY : PDO::MYSQL_ATTR_USE_BUFFERED_QUERY;
+        $this->pdo->setAttribute($buffered, false);
+
+        try {
+            $statement = $this->pdo->query($sql);
+
+            while (($row = $statement->fetch(PDO::FETCH_NUM)) !== false) {
+                yield $row;
+            }
+
+            $statement->closeCursor();
+        } finally {
+            $this->pdo->setAttribute($buffered, true);
+        }
+    }
+
+    public function estimate(array $t): ?int
+    {
+        $rows = dbv_one($this->pdo, 'select table_rows as n from information_schema.tables where table_schema = ? and table_name = ?', [$t['schema'], $t['name']]);
+
+        return $rows === null || $rows['n'] === null ? null : (int) $rows['n'];
+    }
+
+    public function timeLimit(?int $seconds): void
+    {
+        self::timeout($this->pdo, $seconds ?? 30);
+    }
+
+    public function cancelTagged(string $tag): int
+    {
+        $ids = dbv_all($this->pdo, 'select id from information_schema.processlist where id <> connection_id() and db = ? and info like ?',
+            [$this->database, '%'.trim(self::tagComment($tag)).'%']);
+
+        foreach ($ids as $row) {
+            try {
+                $this->pdo->exec('kill query '.(int) $row['id']);
+            } catch (PDOException) {
+                // It finished in the meantime.
+            }
+        }
+
+        return count($ids);
     }
 
     public static function createDatabase(PDO $pdo, string $name, ?string $copyOf): array

@@ -1,29 +1,33 @@
 /*
- * Sqlaris Studio, in the Midnight look: dark glass over a soft glow. The page sets
- * --db whenever the database changes; it is a registered colour, so a change
- * flows across the page instead of snapping. --hue is the colour everything
- * is painted in. With the Database page colours it is --db, so the whole page
- * says which database you are in. With any other set it is that set's own
- * colour, and the database keeps its marks: its tab, its label and the toast
- * on a switch (the --db-* tokens).
+ * Sqlaris Studio. A quiet tool for looking at data: neutral greys, flat
+ * surfaces, hairlines between things, and one colour used sparingly. Nothing
+ * glows, blurs or drifts. Colour marks what you act on: the open database tab,
+ * the primary button, the selection, the focus ring.
+ *
+ * The page sets --db whenever the database changes; it is a registered colour,
+ * so a change flows instead of snapping. --hue is that one colour. With the
+ * Database page colours it is --db, so the button that changes data says which
+ * database you are in. With any other set it is that set's own colour, and the
+ * database keeps its marks: its tab, its label and the toast on a switch (the
+ * --db-* tokens).
  */
 
-/* Inter and JetBrains Mono, from src/libraries.php. Until they are there, the
-   next font in each stack stands in. */
+/* Geist for the page, JetBrains Mono for values and SQL, from src/libraries.php.
+   Until they are there, the next font in each stack stands in. */
 @font-face {
-  font-family: "Inter Variable";
+  font-family: "Geist Variable";
   font-style: normal;
   font-weight: 100 900;
   font-display: swap;
-  src: url("vendor/fonts/inter-latin.woff2") format("woff2-variations");
+  src: url("vendor/fonts/geist-latin.woff2") format("woff2-variations");
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 @font-face {
-  font-family: "Inter Variable";
+  font-family: "Geist Variable";
   font-style: normal;
   font-weight: 100 900;
   font-display: swap;
-  src: url("vendor/fonts/inter-latin-ext.woff2") format("woff2-variations");
+  src: url("vendor/fonts/geist-latin-ext.woff2") format("woff2-variations");
   unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
 }
 @font-face {
@@ -46,41 +50,41 @@
 @property --db {
   syntax: "<color>";
   inherits: true;
-  initial-value: #5b4ef0;
+  initial-value: #3d6fd4;
 }
 
-/* Midnight, the dark theme. The light theme below changes only these values. */
+/* The dark theme. The light theme below changes only these values. The greys are
+   neutral, not tinted blue, every surface is opaque, and text is near white so it reads sharp. */
 :root {
   color-scheme: dark;
-  --db: #5b4ef0;
-  /* The colour the page is painted in: the database's own, unless page colours pick another. */
+  --db: #3d6fd4;
+  /* The one colour on the page: the database's own, unless page colours pick another. */
   --hue: var(--db);
-  --canvas: #08090d;
-  --glass: rgb(16 18 25 / .74);
-  --glass-strong: rgb(20 22 31 / .84);
-  --surface: #101218;
-  --sunken: #151821;
-  --raised: #1b1e28;
-  --field: rgb(255 255 255 / .035);
-  --hover: rgb(255 255 255 / .05);
-  --pill: rgb(255 255 255 / .075);
-  --line: rgb(255 255 255 / .075);
+  --canvas: #0c0c0e;
+  /* The frame around the data: sidebar, top bar, toolbar, pager. */
+  --glass: #141416;
+  /* Menus, dialogs and anything else that sits above the page. */
+  --glass-strong: #1b1b1e;
+  --surface: #111113;
+  --sunken: #18181b;
+  --raised: #1f1f23;
+  --field: rgb(255 255 255 / .03);
+  --hover: rgb(255 255 255 / .045);
+  --pill: rgb(255 255 255 / .07);
+  --line: rgb(255 255 255 / .08);
   --line-soft: rgb(255 255 255 / .05);
   --line-strong: rgb(255 255 255 / .14);
-  --shine: rgb(255 255 255 / .055);
-  /* The light that crosses a database tab on a switch. */
-  --sweep: rgb(255 255 255 / .18);
   --dot: rgb(255 255 255 / .07);
-  --edge: rgb(255 255 255 / .18);
-  --ink: #eceef5;
-  --ink-2: #c3c8d8;
-  --muted: #8b91a7;
-  --faint: #60677d;
-  --accent: color-mix(in oklab, var(--hue) 62%, white);
-  --accent-ink: color-mix(in oklab, var(--hue) 42%, white);
-  --db-mark: color-mix(in oklab, var(--db) 62%, white);
-  --db-ink: color-mix(in oklab, var(--db) 42%, white);
-  --on-accent: #0a0b10;
+  --edge: rgb(255 255 255 / .2);
+  --ink: #f7f7f8;
+  --ink-2: #dcdce0;
+  --muted: #a2a2ab;
+  --faint: #76767f;
+  --accent: color-mix(in oklab, var(--hue) 70%, white);
+  --accent-ink: color-mix(in oklab, var(--hue) 45%, white);
+  --db-mark: color-mix(in oklab, var(--db) 70%, white);
+  --db-ink: color-mix(in oklab, var(--db) 45%, white);
+  --on-accent: #0c0c0e;
   --danger: #ff6b7e;
   --danger-soft: rgb(255 107 126 / .14);
   --danger-solid: #d93a52;
@@ -89,12 +93,11 @@
   --warn: #f5c15a;
   --warn-soft: rgb(245 193 90 / .14);
   --mark: rgb(245 193 90 / .34);
-  --scrim: rgb(3 4 8 / .56);
-  --glow: .55;
-  --number: linear-gradient(180deg, #fff 25%, color-mix(in oklab, var(--hue) 30%, #a9afc3));
-  --shadow-sm: 0 1px 2px rgb(0 0 0 / .5);
-  --shadow: 0 0 0 1px rgb(255 255 255 / .05), 0 24px 60px -18px rgb(0 0 0 / .85);
-  --lift: rgb(0 0 0 / .6);
+  --scrim: rgb(0 0 0 / .5);
+  --number: linear-gradient(var(--ink), var(--ink));
+  --shadow-sm: 0 1px 1px rgb(0 0 0 / .3);
+  --shadow: 0 0 0 1px rgb(255 255 255 / .06), 0 10px 30px -8px rgb(0 0 0 / .7);
+  --lift: rgb(0 0 0 / .5);
   --code-type: #5fd3c4;
   --code-string: #f7bd4a;
   --code-number: #ff8ccf;
@@ -102,21 +105,24 @@
   --s1: #3987e5;
   --s2: #d95926;
   --s3: #199e70;
-  --r-sm: 6px;
-  --r: 9px;
-  --r-lg: 13px;
-  --r-xl: 18px;
-  --sans: "Inter Variable", "Segoe UI", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
-  --display: "Inter Variable", "Segoe UI", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+  /* Small corners. A tool for data reads as precise, not soft. */
+  --r-xs: 3px;
+  --r-sm: 4px;
+  --r: 6px;
+  --r-lg: 8px;
+  --r-xl: 10px;
+  /* Geist: crisp at small sizes, with figures of one width so numbers line up. The system font stands in for other scripts. */
+  --sans: "Geist Variable", "Segoe UI", system-ui, -apple-system, Roboto, "Helvetica Neue", Arial, "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --display: "Geist Variable", "Segoe UI", system-ui, -apple-system, Roboto, "Helvetica Neue", Arial, "Microsoft YaHei", "Noto Sans SC", sans-serif;
   --mono: "JetBrains Mono Variable", "Cascadia Mono", Consolas, ui-monospace, monospace;
   --ease-out: cubic-bezier(.16, 1, .3, 1);
   --ease-in: cubic-bezier(.55, 0, .75, .25);
-  /* A spring that overshoots by about one percent, then settles. */
-  --spring: linear(0, .006 1%, .024 2.1%, .092 4.3%, .33 9.3%, .56 14.4%, .74 19.6%, .862 24.8%, .937 30%, .98 35.3%, 1.002 40.8%, 1.011 46.6%, 1.012 53.3%, 1.008 62.2%, 1.002 78.1%, 1);
+  /* Quick to start and settles without overshooting. The name stays so older rules keep working. */
+  --spring: cubic-bezier(.2, .8, .2, 1);
   --fast: 120ms;
-  --normal: 200ms;
-  --slow: 320ms;
-  transition: --db .8s var(--ease-out);
+  --normal: 180ms;
+  --slow: 260ms;
+  transition: --db .5s var(--ease-out);
 }
 
 /* The first colour of a page load is set at once, not flowed into. */
@@ -124,26 +130,24 @@
 
 :root[data-theme="light"] {
   color-scheme: light;
-  --canvas: #f2f3f7;
-  --glass: rgb(255 255 255 / .7);
-  --glass-strong: rgb(255 255 255 / .86);
+  --canvas: #f4f4f5;
+  --glass: #ffffff;
+  --glass-strong: #ffffff;
   --surface: #ffffff;
-  --sunken: #f6f7fa;
+  --sunken: #f8f8f9;
   --raised: #ffffff;
-  --field: rgb(255 255 255 / .8);
-  --hover: rgb(22 25 39 / .045);
-  --pill: rgb(22 25 39 / .06);
-  --line: rgb(22 25 39 / .09);
-  --line-soft: rgb(22 25 39 / .06);
-  --line-strong: rgb(22 25 39 / .16);
-  --shine: rgb(255 255 255 / .8);
-  --sweep: rgb(255 255 255 / .55);
-  --dot: rgb(22 25 39 / .1);
-  --edge: rgb(22 25 39 / .22);
-  --ink: #12151f;
-  --ink-2: #3a3f53;
-  --muted: #646a7f;
-  --faint: #9ba0b2;
+  --field: #ffffff;
+  --hover: rgb(0 0 0 / .04);
+  --pill: rgb(0 0 0 / .06);
+  --line: rgb(0 0 0 / .09);
+  --line-soft: rgb(0 0 0 / .06);
+  --line-strong: rgb(0 0 0 / .15);
+  --dot: rgb(0 0 0 / .1);
+  --edge: rgb(0 0 0 / .26);
+  --ink: #09090b;
+  --ink-2: #27272a;
+  --muted: #5d5d66;
+  --faint: #8e8e98;
   --accent: var(--hue);
   --accent-ink: color-mix(in oklab, var(--hue) 84%, black);
   --db-mark: var(--db);
@@ -157,12 +161,11 @@
   --warn: #9a5700;
   --warn-soft: #fff4dc;
   --mark: #ffe27a;
-  --scrim: rgb(14 16 28 / .3);
-  --glow: .22;
+  --scrim: rgb(0 0 0 / .28);
   --number: linear-gradient(var(--ink), var(--ink));
-  --shadow-sm: 0 1px 2px rgb(22 25 39 / .06);
-  --shadow: 0 0 0 1px rgb(22 25 39 / .05), 0 22px 50px -18px rgb(22 25 39 / .3);
-  --lift: rgb(22 25 39 / .18);
+  --shadow-sm: 0 1px 1px rgb(0 0 0 / .04);
+  --shadow: 0 0 0 1px rgb(0 0 0 / .06), 0 8px 24px -6px rgb(0 0 0 / .14);
+  --lift: rgb(0 0 0 / .12);
   --code-type: #0b7a70;
   --code-string: #b35a00;
   --code-number: #b0287a;
@@ -174,26 +177,24 @@
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
     color-scheme: light;
-    --canvas: #f2f3f7;
-    --glass: rgb(255 255 255 / .7);
-    --glass-strong: rgb(255 255 255 / .86);
+    --canvas: #f4f4f5;
+    --glass: #ffffff;
+    --glass-strong: #ffffff;
     --surface: #ffffff;
-    --sunken: #f6f7fa;
+    --sunken: #f8f8f9;
     --raised: #ffffff;
-    --field: rgb(255 255 255 / .8);
-    --hover: rgb(22 25 39 / .045);
-    --pill: rgb(22 25 39 / .06);
-    --line: rgb(22 25 39 / .09);
-    --line-soft: rgb(22 25 39 / .06);
-    --line-strong: rgb(22 25 39 / .16);
-    --shine: rgb(255 255 255 / .8);
-    --sweep: rgb(255 255 255 / .55);
-    --dot: rgb(22 25 39 / .1);
-    --edge: rgb(22 25 39 / .22);
-    --ink: #12151f;
-    --ink-2: #3a3f53;
-    --muted: #646a7f;
-    --faint: #9ba0b2;
+    --field: #ffffff;
+    --hover: rgb(0 0 0 / .04);
+    --pill: rgb(0 0 0 / .06);
+    --line: rgb(0 0 0 / .09);
+    --line-soft: rgb(0 0 0 / .06);
+    --line-strong: rgb(0 0 0 / .15);
+    --dot: rgb(0 0 0 / .1);
+    --edge: rgb(0 0 0 / .26);
+    --ink: #09090b;
+    --ink-2: #27272a;
+    --muted: #5d5d66;
+    --faint: #8e8e98;
     --accent: var(--hue);
     --accent-ink: color-mix(in oklab, var(--hue) 84%, black);
     --db-mark: var(--db);
@@ -207,12 +208,11 @@
     --warn: #9a5700;
     --warn-soft: #fff4dc;
     --mark: #ffe27a;
-    --scrim: rgb(14 16 28 / .3);
-    --glow: .22;
+    --scrim: rgb(0 0 0 / .28);
     --number: linear-gradient(var(--ink), var(--ink));
-    --shadow-sm: 0 1px 2px rgb(22 25 39 / .06);
-    --shadow: 0 0 0 1px rgb(22 25 39 / .05), 0 22px 50px -18px rgb(22 25 39 / .3);
-    --lift: rgb(22 25 39 / .18);
+    --shadow-sm: 0 1px 1px rgb(0 0 0 / .04);
+    --shadow: 0 0 0 1px rgb(0 0 0 / .06), 0 8px 24px -6px rgb(0 0 0 / .14);
+    --lift: rgb(0 0 0 / .12);
     --code-type: #0b7a70;
     --code-string: #b35a00;
     --code-number: #b0287a;
@@ -224,34 +224,34 @@
 
 /* Shades of the database colour, worked out from whatever --accent is. */
 :root, :root[data-theme] {
-  --accent-soft: color-mix(in oklab, var(--accent) 15%, transparent);
+  --accent-soft: color-mix(in oklab, var(--accent) 14%, transparent);
   --accent-faint: color-mix(in oklab, var(--accent) 7%, transparent);
   --accent-line: color-mix(in oklab, var(--accent) 42%, transparent);
-  --accent-hover: color-mix(in oklab, var(--accent) 86%, black);
-  --accent-glow: color-mix(in oklab, var(--hue) 60%, transparent);
-  /* The database's own marks: its tab and its label. */
-  --db-soft: color-mix(in oklab, var(--db-mark) 15%, transparent);
-  --db-glow: color-mix(in oklab, var(--db) 60%, transparent);
+  --accent-hover: color-mix(in oklab, var(--accent) 88%, black);
   --focus: color-mix(in oklab, var(--accent) 28%, transparent);
   /* Grid rows are opaque, so the sticky row number never shows a cell sliding under it. */
-  --row-hover: color-mix(in oklab, var(--ink) 4%, var(--surface));
-  --row-picked: color-mix(in oklab, var(--accent) 9%, var(--surface));
-  --row-selected: color-mix(in oklab, var(--accent) 16%, var(--surface));
+  --row-hover: color-mix(in oklab, var(--ink) 3.5%, var(--surface));
+  --row-picked: color-mix(in oklab, var(--accent) 8%, var(--surface));
+  --row-selected: color-mix(in oklab, var(--accent) 13%, var(--surface));
   --thumb: color-mix(in oklab, var(--ink) 14%, transparent);
   --thumb-near: color-mix(in oklab, var(--ink) 26%, transparent);
   --thumb-hover: color-mix(in oklab, var(--ink) 42%, transparent);
+  /* The page colours picker shows each set in both themes at once, whichever is on. */
+  --swatch-dark: #0c0c0e;
+  --swatch-light: #f4f4f5;
 }
 
 /*
- * The page colours. Database, the default, has no data-tint: the page takes
- * the colour of the database on screen. Each other set is one tint. It paints
- * everything the database colour would, and the page's neutral colours are
- * worked out from it below, for dark and for light. Midnight keeps the
- * design's own neutrals and only brings its indigo. app.js sets data-tint on
- * the page, and the same attribute on a swatch in the picker gives it the tint
- * to show. Each tint is dark enough for white text on a button in light.
+ * The page colours. Database, the default, has no data-tint: the accent is the
+ * colour of the database on screen. Each other set is one tint. It takes the
+ * place of the database colour, and shifts the greys towards it only a few
+ * percent, so the page stays neutral and the tint shows where colour means
+ * something. Midnight keeps the plain greys and only brings its blue. app.js
+ * sets data-tint on the page, and the same attribute on a swatch in the picker
+ * gives it the tint to show. Each tint is dark enough for white text on a
+ * button in light.
  */
-[data-tint="midnight"] { --tint: #6366f1; }
+[data-tint="midnight"] { --tint: #5a5fcf; }
 [data-tint="graphite"] { --tint: #71717a; }
 [data-tint="ocean"] { --tint: #0a86a8; }
 [data-tint="forest"] { --tint: #16874d; }
@@ -261,50 +261,50 @@
 
 /* Dark. It comes after the theme blocks, and the light blocks after it are more specific, so each wins where it should. */
 :root[data-tint]:not([data-tint="midnight"]) {
-  --canvas: color-mix(in oklab, var(--tint) 22%, #060608);
-  --glass: color-mix(in oklab, color-mix(in oklab, var(--tint) 20%, #0d0d0f) 74%, transparent);
-  --glass-strong: color-mix(in oklab, color-mix(in oklab, var(--tint) 20%, #111113) 84%, transparent);
-  --surface: color-mix(in oklab, var(--tint) 19%, #0d0d0f);
-  --sunken: color-mix(in oklab, var(--tint) 21%, #121214);
-  --raised: color-mix(in oklab, var(--tint) 23%, #18181a);
-  --ink: color-mix(in oklab, var(--tint) 5%, #eeeef0);
-  --ink-2: color-mix(in oklab, var(--tint) 10%, #c5c6cc);
-  --muted: color-mix(in oklab, var(--tint) 18%, #898a93);
-  --faint: color-mix(in oklab, var(--tint) 18%, #5c5d66);
+  --canvas: color-mix(in oklab, var(--tint) 4%, #0c0c0e);
+  --glass: color-mix(in oklab, var(--tint) 4%, #141416);
+  --glass-strong: color-mix(in oklab, var(--tint) 4%, #1b1b1e);
+  --surface: color-mix(in oklab, var(--tint) 3%, #111113);
+  --sunken: color-mix(in oklab, var(--tint) 4%, #18181b);
+  --raised: color-mix(in oklab, var(--tint) 5%, #1f1f23);
+  --ink: color-mix(in oklab, var(--tint) 2%, #f7f7f8);
+  --ink-2: color-mix(in oklab, var(--tint) 3%, #dcdce0);
+  --muted: color-mix(in oklab, var(--tint) 6%, #a2a2ab);
+  --faint: color-mix(in oklab, var(--tint) 6%, #76767f);
 }
 
 :root[data-tint]:not([data-tint="midnight"])[data-theme="light"] {
-  --canvas: color-mix(in oklab, var(--tint) 13%, #f2f2f3);
-  --glass: color-mix(in oklab, color-mix(in oklab, var(--tint) 6%, #ffffff) 70%, transparent);
-  --glass-strong: color-mix(in oklab, color-mix(in oklab, var(--tint) 5%, #ffffff) 86%, transparent);
+  --canvas: color-mix(in oklab, var(--tint) 4%, #f4f4f5);
+  --glass: color-mix(in oklab, var(--tint) 2%, #ffffff);
+  --glass-strong: #ffffff;
   --surface: #ffffff;
-  --sunken: color-mix(in oklab, var(--tint) 7%, #f6f6f7);
+  --sunken: color-mix(in oklab, var(--tint) 3%, #f8f8f9);
   --raised: #ffffff;
-  --ink: color-mix(in oklab, var(--tint) 10%, #121317);
-  --ink-2: color-mix(in oklab, var(--tint) 14%, #3a3b44);
-  --muted: color-mix(in oklab, var(--tint) 16%, #63646e);
-  --faint: color-mix(in oklab, var(--tint) 12%, #9b9ca5);
+  --ink: color-mix(in oklab, var(--tint) 4%, #09090b);
+  --ink-2: color-mix(in oklab, var(--tint) 5%, #27272a);
+  --muted: color-mix(in oklab, var(--tint) 6%, #5d5d66);
+  --faint: color-mix(in oklab, var(--tint) 5%, #8e8e98);
 }
 
 @media (prefers-color-scheme: light) {
   :root[data-tint]:not([data-tint="midnight"]):not([data-theme="dark"]) {
-    --canvas: color-mix(in oklab, var(--tint) 13%, #f2f2f3);
-    --glass: color-mix(in oklab, color-mix(in oklab, var(--tint) 6%, #ffffff) 70%, transparent);
-    --glass-strong: color-mix(in oklab, color-mix(in oklab, var(--tint) 5%, #ffffff) 86%, transparent);
+    --canvas: color-mix(in oklab, var(--tint) 4%, #f4f4f5);
+    --glass: color-mix(in oklab, var(--tint) 2%, #ffffff);
+    --glass-strong: #ffffff;
     --surface: #ffffff;
-    --sunken: color-mix(in oklab, var(--tint) 7%, #f6f6f7);
+    --sunken: color-mix(in oklab, var(--tint) 3%, #f8f8f9);
     --raised: #ffffff;
-    --ink: color-mix(in oklab, var(--tint) 10%, #121317);
-    --ink-2: color-mix(in oklab, var(--tint) 14%, #3a3b44);
-    --muted: color-mix(in oklab, var(--tint) 16%, #63646e);
-    --faint: color-mix(in oklab, var(--tint) 12%, #9b9ca5);
+    --ink: color-mix(in oklab, var(--tint) 4%, #09090b);
+    --ink-2: color-mix(in oklab, var(--tint) 5%, #27272a);
+    --muted: color-mix(in oklab, var(--tint) 6%, #5d5d66);
+    --faint: color-mix(in oklab, var(--tint) 5%, #8e8e98);
   }
 }
 
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body {
-  font: 13.5px/1.5 var(--sans);
+  font: 13px/1.5 var(--sans);
   background: var(--canvas);
   color: var(--ink);
   -webkit-font-smoothing: antialiased;
@@ -320,7 +320,7 @@ kbd {
   padding: 1px 6px;
   border: 1px solid var(--line-strong);
   border-bottom-width: 2px;
-  border-radius: 5px;
+  border-radius: var(--r-xs);
   color: var(--muted);
   background: var(--field);
   white-space: nowrap;
@@ -346,31 +346,6 @@ h1, h2, h3 { margin: 0; font-family: var(--display); font-weight: 600; letter-sp
   stroke-linejoin: round;
 }
 
-/* The glow behind everything: two soft shapes in the database colour. They
-   are soft gradients, not a blur filter, and move only by transform, so the
-   drift costs the graphics card next to nothing. A hidden tab is not drawn. */
-.aurora { position: fixed; inset: 0; z-index: -1; overflow: hidden; pointer-events: none; opacity: var(--glow); }
-.aurora::before, .aurora::after { content: ""; position: absolute; border-radius: 50%; will-change: transform; }
-.aurora::before {
-  width: 72vmax;
-  height: 62vmax;
-  left: -14vmax;
-  top: -24vmax;
-  background: radial-gradient(closest-side, color-mix(in oklab, var(--hue) 72%, transparent), transparent);
-  animation: drift-a 22s ease-in-out infinite alternate;
-}
-.aurora::after {
-  width: 62vmax;
-  height: 56vmax;
-  right: -18vmax;
-  bottom: -26vmax;
-  background: radial-gradient(closest-side, color-mix(in oklab, var(--hue) 40%, var(--tint, #3b2bd9) 32%), transparent);
-  opacity: .7;
-  animation: drift-b 27s ease-in-out infinite alternate;
-}
-@keyframes drift-a { to { transform: translate(12vmax, 9vmax) scale(1.12); } }
-@keyframes drift-b { to { transform: translate(-10vmax, -7vmax) scale(.92); } }
-
 /* The thin bar at the top while a request is out. */
 .progress {
   position: fixed;
@@ -387,8 +362,7 @@ h1, h2, h3 { margin: 0; font-family: var(--display); font-weight: 600; letter-sp
   position: absolute;
   inset: 0;
   width: 40%;
-  background: linear-gradient(90deg, transparent, var(--accent), transparent);
-  box-shadow: 0 0 12px var(--accent);
+  background: var(--accent);
   animation: slide 1.1s var(--ease-out) infinite;
 }
 body.busy .progress { opacity: 1; }
@@ -426,22 +400,20 @@ body.busy .progress { opacity: 1; }
 /* ------------------------------------------------------------------ layout */
 
 #app { height: 100%; display: grid; grid-template-columns: 272px minmax(0, 1fr); }
-/* Translucent without blur: the glow behind is soft already, and blurring a drifting glow costs work every frame. */
 .side {
   position: relative;
   z-index: 3;
   background: var(--glass);
   border-right: 1px solid var(--line);
-  box-shadow: inset -1px 0 0 var(--shine);
   display: flex;
   flex-direction: column;
   min-height: 0;
 }
 .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .view { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
-/* Each new view rises in. A change inside a view, such as a new page of rows, does not. */
-.view > * { animation: view-in .3s var(--ease-out) both; }
-@keyframes view-in { from { opacity: 0; transform: translateY(8px); } }
+/* Each new view fades in, quickly. A change inside a view, such as a new page of rows, does not. */
+.view > * { animation: view-in var(--normal) var(--ease-out) both; }
+@keyframes view-in { from { opacity: 0; } }
 
 /* ----------------------------------------------------------------- sidebar */
 
@@ -449,11 +421,11 @@ body.busy .progress { opacity: 1; }
   display: flex;
   align-items: center;
   gap: 9px;
-  padding: 18px 18px 14px;
-  font: 650 15px var(--display);
+  padding: 16px 16px 12px 18px;
+  font: 600 14px var(--display);
   letter-spacing: -.01em;
 }
-.brand .i { width: 19px; height: 19px; color: var(--accent); filter: drop-shadow(0 0 6px var(--accent-glow)); }
+.brand .i { width: 18px; height: 18px; color: var(--ink-2); }
 .brand .server { margin-left: auto; font: 400 11px var(--mono); color: var(--faint); letter-spacing: 0; }
 
 .side-search { position: relative; margin: 0 12px 8px; display: flex; align-items: center; }
@@ -468,13 +440,12 @@ body.busy .progress { opacity: 1; }
   left: 8px;
   right: 8px;
   top: 0;
-  height: 31px;
+  height: 28px;
   border-radius: var(--r);
-  background: var(--accent-soft);
-  box-shadow: inset 0 0 0 1px var(--accent-line), 0 6px 20px -10px var(--accent-glow);
+  background: var(--pill);
   opacity: 0;
   pointer-events: none;
-  transition: transform .45s var(--spring), height var(--slow) var(--ease-out), opacity var(--normal);
+  transition: transform var(--slow) var(--ease-out), height var(--slow) var(--ease-out), opacity var(--normal);
 }
 .table-pill.instant, .tab-ink.instant, .segmented-ink.instant { transition: none; }
 .table-item {
@@ -483,7 +454,7 @@ body.busy .progress { opacity: 1; }
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 31px;
+  height: 28px;
   padding: 0 10px;
   border-radius: var(--r);
   color: var(--ink-2);
@@ -495,9 +466,11 @@ body.busy .progress { opacity: 1; }
 .table-item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .table-item .count { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .table-item.is-empty .count { color: var(--faint); }
-.table-item.active { color: var(--accent-ink); font-weight: 600; }
+.table-item.active { color: var(--ink); font-weight: 600; }
 .table-item.active:hover { background: none; }
-.table-item.active .i, .table-item.active .count { color: var(--accent-ink); }
+/* The one touch of colour in the list: the icon of the open table. */
+.table-item.active .i { color: var(--accent); }
+.table-item.active .count { color: var(--muted); }
 .side-empty { padding: 12px 10px; color: var(--muted); }
 .side-foot { padding: 11px 18px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); }
 
@@ -533,23 +506,23 @@ body.busy .progress { opacity: 1; }
   background: var(--glass);
   border-color: var(--line);
   color: var(--ink);
-  box-shadow: inset 0 2px 0 var(--db-mark), inset 0 18px 22px -20px var(--db-glow);
+  box-shadow: inset 0 2px 0 var(--db-mark);
 }
-.db-tab-name { display: flex; align-items: center; gap: 9px; min-width: 0; height: 100%; padding: 0 6px 0 12px; border: 0; background: none; color: inherit; font-weight: 550; cursor: pointer; }
+.db-tab-name { display: flex; align-items: center; gap: 9px; min-width: 0; height: 100%; padding: 0 6px 0 12px; border: 0; background: none; color: inherit; font-weight: 500; cursor: pointer; }
 .db-tab-name .grow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .db-tab-name:focus-visible { outline-offset: -3px; border-radius: var(--r); }
-.db-tab.active .db-tab-name { font-weight: 650; cursor: default; }
+.db-tab.active .db-tab-name { font-weight: 600; cursor: default; }
 .db-tab-db { flex-shrink: 0; white-space: nowrap; }
 /* The table the tab is on, which tells two tabs of one database apart. */
 .db-tab-name small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font-size: 12px; font-weight: 500; }
 .db-tab.active .db-tab-name small { color: var(--muted); }
 /* Dragging a tab: it fades, and a bar shows the side of the tab it would land on. */
 .db-tab.dragging { opacity: .45; }
-.db-tab.drop-before::before, .db-tab.drop-after::before { content: ""; position: absolute; top: 7px; bottom: 7px; width: 2px; border-radius: 2px; background: var(--accent); box-shadow: 0 0 8px var(--accent-glow); }
+.db-tab.drop-before::before, .db-tab.drop-after::before { content: ""; position: absolute; top: 7px; bottom: 7px; width: 2px; border-radius: var(--r-xs); background: var(--accent); }
 .db-tab.drop-before::before { left: 0; }
 .db-tab.drop-after::before { right: 0; }
 .db-tab .dot { background: var(--c); }
-.db-tab.active .dot { background: var(--db-mark); box-shadow: 0 0 0 3px var(--db-soft), 0 0 10px var(--db-mark); }
+.db-tab.active .dot { background: var(--db-mark); }
 .db-tab-close { display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: var(--r-sm); background: none; color: var(--faint); cursor: pointer; opacity: 0; transition: opacity var(--fast), background var(--fast), color var(--fast); }
 .db-tab-close .i { width: 12px; height: 12px; }
 .db-tab:hover .db-tab-close, .db-tab.active .db-tab-close, .db-tab-close:focus-visible { opacity: 1; }
@@ -557,28 +530,17 @@ body.busy .progress { opacity: 1; }
 .db-tab-add { align-self: center; flex-shrink: 0; }
 /* One of your own groups: its name, a search across its databases, and a tab
    for each of them, on a tray of their own. */
-.tab-group { display: flex; align-items: flex-end; gap: 2px; flex-shrink: 0; height: 40px; padding: 0 3px; border: 1px solid var(--line); border-bottom: 0; border-radius: 12px 12px 0 0; background: var(--field); }
+.tab-group { display: flex; align-items: flex-end; gap: 2px; flex-shrink: 0; height: 40px; padding: 0 3px; border: 1px solid var(--line); border-bottom: 0; border-radius: var(--r-lg) var(--r-lg) 0 0; background: var(--field); }
 .tab-group + .tab-group, .tab-group + .db-tab { margin-left: 6px; }
 /* Level with the middle of the tabs beside it. */
-.tab-group-head { display: flex; align-items: center; flex-shrink: 0; height: 28px; margin: 0 4px 3px 1px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--hover); }
-.tab-group-name { display: flex; align-items: center; gap: 6px; height: 100%; padding: 0 8px; border: 0; background: none; color: var(--ink-2); font-size: 12.5px; font-weight: 650; white-space: nowrap; cursor: pointer; }
+.tab-group-head { display: flex; align-items: center; flex-shrink: 0; height: 28px; margin: 0 4px 3px 1px; border: 1px solid var(--line-strong); border-radius: var(--r); background: var(--hover); }
+.tab-group-name { display: flex; align-items: center; gap: 6px; height: 100%; padding: 0 8px; border: 0; background: none; color: var(--ink-2); font-size: 12.5px; font-weight: 600; white-space: nowrap; cursor: pointer; }
 .tab-group-name .i { width: 12px; height: 12px; color: var(--faint); }
 .tab-group-name .count { color: var(--faint); font-weight: 500; font-variant-numeric: tabular-nums; }
-.tab-group-find { display: grid; place-items: center; width: 24px; height: 22px; margin-right: 2px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--muted); cursor: pointer; transition: background var(--fast), color var(--fast); }
+.tab-group-find { display: grid; place-items: center; width: 24px; height: 22px; margin-right: 2px; padding: 0; border: 0; border-radius: var(--r-sm); background: none; color: var(--muted); cursor: pointer; transition: background var(--fast), color var(--fast); }
 .tab-group-find .i { width: 14px; height: 14px; }
 .tab-group-find:hover { background: var(--pill); color: var(--ink); }
 .tab-group-name:focus-visible, .tab-group-find:focus-visible { outline-offset: -2px; }
-/* A light sweeps across the tab of the database just switched to. */
-.db-tab::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(105deg, transparent 30%, var(--sweep) 50%, transparent 70%);
-  transform: translateX(-120%);
-  pointer-events: none;
-}
-.db-tab.sweep::after { animation: sweep .9s var(--ease-out); }
-@keyframes sweep { to { transform: translateX(120%); } }
 
 /* ----------------------------------------------------------------- top bar */
 
@@ -587,9 +549,9 @@ body.busy .progress { opacity: 1; }
   z-index: 2;
   display: flex;
   align-items: stretch;
-  gap: 22px;
-  padding: 0 16px 0 20px;
-  height: 56px;
+  gap: 20px;
+  padding: 0 12px 0 20px;
+  height: 48px;
   border-bottom: 1px solid var(--line);
   background: var(--glass);
   flex-shrink: 0;
@@ -598,22 +560,45 @@ body.busy .progress { opacity: 1; }
 .crumbs a { color: var(--muted); }
 .crumbs a:hover { color: var(--ink); }
 .crumbs .sep { color: var(--line-strong); }
-.crumbs .current { display: inline-block; font: 650 15px var(--display); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.crumbs .current.enter { animation: crumb-in .4s var(--spring); }
-@keyframes crumb-in { from { opacity: 0; transform: translateY(6px); filter: blur(3px); } }
+.crumbs .current { display: inline-block; font: 600 14px var(--display); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.crumbs .current.enter { animation: crumb-in var(--normal) var(--ease-out); }
+/* A protected database: amber while changes are blocked, plain while unlocked. */
+.lock-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 22px;
+  border-radius: var(--r-sm);
+  border: 1px solid transparent;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font: 500 11.5px var(--sans);
+  white-space: nowrap;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: background var(--fast), color var(--fast);
+}
+.lock-chip .i { width: 13px; height: 13px; }
+.lock-chip.open { background: var(--field); border-color: var(--line); color: var(--muted); }
+.lock-chip:hover { color: var(--ink); }
+/* The lock takes a little room, so the header's spaces give it that room. */
+.top:has(.lock-chip) { gap: 14px; }
+.lock-mark { display: inline-flex; color: var(--warn); }
+.lock-mark .i { width: 12px; height: 12px; }
+@keyframes crumb-in { from { opacity: 0; } }
 .tabs { position: relative; display: flex; align-items: center; gap: 2px; }
-/* One highlight slides to the active tab. */
+/* A line under the active tab, on the bar's own bottom edge, slides to the one picked. */
 .tab-ink {
   position: absolute;
   left: 0;
-  top: 11px;
-  bottom: 11px;
-  border-radius: 9px;
-  background: var(--pill);
-  box-shadow: inset 0 0 0 1px var(--line-strong), 0 0 24px -8px var(--accent-glow);
+  bottom: -1px;
+  height: 2px;
+  border-radius: var(--r-xs) var(--r-xs) 0 0;
+  background: var(--ink);
   opacity: 0;
   pointer-events: none;
-  transition: transform .5s var(--spring), width .5s var(--spring), opacity var(--normal);
+  transition: transform var(--slow) var(--ease-out), width var(--slow) var(--ease-out), opacity var(--normal);
 }
 .tab {
   position: relative;
@@ -621,10 +606,10 @@ body.busy .progress { opacity: 1; }
   display: flex;
   align-items: center;
   gap: 7px;
-  height: 34px;
-  padding: 0 12px;
+  height: 100%;
+  padding: 0 10px;
   border: 0;
-  border-radius: 9px;
+  border-radius: 0;
   background: none;
   color: var(--muted);
   font-weight: 500;
@@ -634,7 +619,7 @@ body.busy .progress { opacity: 1; }
 .tab .i { width: 15px; height: 15px; transition: color var(--normal); }
 .tab:hover { color: var(--ink); }
 .tab.active { color: var(--ink); font-weight: 600; }
-.tab.active .i { color: var(--accent); }
+.tab.active .i { color: var(--ink); }
 .top-actions { margin-left: auto; display: flex; gap: 4px; align-items: center; }
 
 /* ---------------------------------------------------------------- controls */
@@ -651,7 +636,7 @@ body.busy .progress { opacity: 1; }
   color: var(--ink-2);
   font-weight: 500;
   font-size: 13px;
-  box-shadow: inset 0 1px 0 var(--shine);
+  box-shadow: var(--shadow-sm);
   cursor: pointer;
   white-space: nowrap;
   transition: background var(--fast), border-color var(--fast), color var(--fast), transform var(--fast), box-shadow var(--normal);
@@ -660,14 +645,17 @@ body.busy .progress { opacity: 1; }
 .btn:active:not(:disabled) { transform: scale(.97); }
 .btn:disabled { opacity: .45; cursor: default; }
 .btn .i { width: 15px; height: 15px; }
+/* Icons sit a step quieter than the words beside them. */
+:where(.btn:not(.primary, .danger, .on)) .i { color: var(--muted); transition: color var(--fast); }
+:where(.btn:not(.primary, .danger, .on):hover) .i { color: var(--ink-2); }
 .btn.primary {
   background: var(--accent);
   border-color: transparent;
   color: var(--on-accent);
   font-weight: 600;
-  box-shadow: 0 6px 18px -8px var(--accent-glow), inset 0 1px 0 rgb(255 255 255 / .25);
+  box-shadow: var(--shadow-sm);
 }
-.btn.primary:hover:not(:disabled) { background: var(--accent-hover); color: var(--on-accent); box-shadow: 0 8px 22px -8px var(--accent-glow), inset 0 1px 0 rgb(255 255 255 / .25); }
+.btn.primary:hover:not(:disabled) { background: var(--accent-hover); color: var(--on-accent); }
 .btn.danger { color: var(--danger); }
 .btn.danger:hover:not(:disabled) { color: var(--danger); border-color: color-mix(in oklab, var(--danger) 40%, transparent); background: var(--danger-soft); }
 .btn.danger.solid { background: var(--danger-solid); border-color: transparent; color: #fff; font-weight: 600; }
@@ -696,16 +684,58 @@ body.busy .progress { opacity: 1; }
 }
 .input::placeholder { color: var(--faint); }
 textarea.input { height: auto; padding: 8px 11px; resize: vertical; line-height: 1.5; }
-.input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus); background: var(--surface); }
-.input:disabled { background: var(--sunken); color: var(--muted); }
+/* Only the colour changes on focus, so a select keeps its arrow. */
+.input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus); background-color: var(--surface); }
+.input:disabled { background-color: var(--sunken); color: var(--muted); }
+/* The system arrow looks out of place in both themes, so the select draws its own from two corners. */
+select.input {
+  appearance: none;
+  padding-right: 30px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 15px) 50%, calc(100% - 10px) 50%;
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+  cursor: pointer;
+}
 select.input option { background: var(--raised); color: var(--ink); }
 input[type="search"]::-webkit-search-cancel-button { cursor: pointer; }
-input[type="checkbox"] { accent-color: var(--accent); }
+/* A checkbox drawn from the tokens instead of the system's, with the tick as a turned corner. */
+input[type="checkbox"] {
+  appearance: none;
+  display: inline-grid;
+  place-content: center;
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  border: 1.5px solid var(--edge);
+  border-radius: var(--r-xs);
+  background: var(--field);
+  cursor: pointer;
+  vertical-align: middle;
+  transition: background var(--fast), border-color var(--fast), box-shadow var(--normal);
+}
+input[type="checkbox"]::before {
+  content: "";
+  width: 4px;
+  height: 8px;
+  margin-top: -2px;
+  border: solid var(--on-accent);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg) scale(0);
+  transition: transform var(--fast) var(--ease-out);
+}
+input[type="checkbox"]:hover:not(:disabled) { border-color: var(--accent); }
+input[type="checkbox"]:checked, input[type="checkbox"]:indeterminate { background: var(--accent); border-color: var(--accent); }
+input[type="checkbox"]:checked::before { transform: rotate(45deg) scale(1); }
+input[type="checkbox"]:indeterminate::before { width: 8px; height: 0; margin: 0; border-width: 0 0 2px; transform: none; }
+input[type="checkbox"]:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--focus); }
+input[type="checkbox"]:disabled { opacity: .45; cursor: default; }
 
 .tag {
   display: inline-block;
-  padding: 1px 8px;
-  border-radius: 999px;
+  padding: 1px 7px;
+  border-radius: var(--r-xs);
   background: var(--field);
   border: 1px solid var(--line);
   color: var(--muted);
@@ -719,7 +749,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .badge {
   font: 700 10px var(--sans);
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   background: var(--warn-soft);
   color: var(--warn);
   letter-spacing: .03em;
@@ -732,7 +762,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
   position: relative;
   display: inline-flex;
   padding: 3px;
-  border-radius: 11px;
+  border-radius: var(--r);
   background: var(--field);
   box-shadow: inset 0 0 0 1px var(--line);
 }
@@ -742,10 +772,10 @@ input[type="checkbox"] { accent-color: var(--accent); }
   height: 26px;
   padding: 0 12px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   background: none;
   color: var(--muted);
-  font-weight: 550;
+  font-weight: 500;
   font-size: 12.5px;
   cursor: pointer;
   transition: color var(--normal);
@@ -757,12 +787,12 @@ input[type="checkbox"] { accent-color: var(--accent); }
   left: 0;
   top: 3px;
   bottom: 3px;
-  border-radius: 8px;
-  background: var(--pill);
-  box-shadow: inset 0 0 0 1px var(--line-strong), 0 0 20px -6px var(--accent-glow);
+  border-radius: var(--r-sm);
+  background: var(--raised);
+  box-shadow: 0 0 0 1px var(--line-strong), var(--shadow-sm);
   opacity: 0;
   pointer-events: none;
-  transition: transform .5s var(--spring), width .5s var(--spring), opacity var(--normal);
+  transition: transform var(--slow) var(--ease-out), width var(--slow) var(--ease-out), opacity var(--normal);
 }
 
 /* The theme switch in the top bar: three icons, with the highlight on the one in use. */
@@ -771,7 +801,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .segmented.icons button { display: grid; place-items: center; width: 30px; height: 26px; padding: 0; }
 .segmented.icons .segmented-ink { top: 2px; bottom: 2px; }
 .segmented button .i { width: 15px; height: 15px; transition: color var(--normal); }
-.segmented button.on .i { color: var(--accent); }
+.segmented button.on .i { color: var(--ink); }
 
 /* The page colours picker: a swatch per tint, dark on one side and light on
    the other, with a bar in the database colour that every tint keeps. */
@@ -789,7 +819,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
   background: none;
   color: var(--ink-2);
   font-size: 12px;
-  font-weight: 550;
+  font-weight: 500;
   text-align: left;
   cursor: pointer;
   transition: background var(--fast), border-color var(--fast), color var(--fast);
@@ -799,17 +829,17 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .tint-swatch {
   position: relative;
   height: 44px;
-  border-radius: 7px;
+  border-radius: var(--r-sm);
   overflow: hidden;
   box-shadow: inset 0 0 0 1px var(--line-strong);
-  background: linear-gradient(135deg, color-mix(in oklab, var(--tint) 24%, #08080a) 50%, color-mix(in oklab, var(--tint) 13%, #f2f2f3) 50%);
+  background: linear-gradient(135deg, color-mix(in oklab, var(--tint) 18%, var(--swatch-dark)) 50%, color-mix(in oklab, var(--tint) 10%, var(--swatch-light)) 50%);
   transition: transform var(--normal) var(--spring);
 }
 .tint-choice:hover .tint-swatch { transform: scale(1.04); }
-.tint-swatch::before { content: ""; position: absolute; left: 7px; top: 7px; width: 13px; height: 13px; border-radius: 50%; background: var(--tint); box-shadow: 0 0 12px var(--tint); }
-.tint-swatch::after { content: ""; position: absolute; right: 7px; bottom: 7px; width: 18px; height: 4px; border-radius: 2px; background: var(--db); }
-.tint-choice[data-tint="database"] .tint-swatch, .tint-choice[data-tint="midnight"] .tint-swatch { background: linear-gradient(135deg, #0a0b10 50%, #f2f3f7 50%); }
-.tint-choice[data-tint="database"] .tint-swatch::before { background: var(--db); box-shadow: 0 0 12px var(--db); }
+.tint-swatch::before { content: ""; position: absolute; left: 7px; top: 7px; width: 13px; height: 13px; border-radius: 50%; background: var(--tint); }
+.tint-swatch::after { content: ""; position: absolute; right: 7px; bottom: 7px; width: 18px; height: 4px; border-radius: var(--r-xs); background: var(--db); }
+.tint-choice[data-tint="database"] .tint-swatch, .tint-choice[data-tint="midnight"] .tint-swatch { background: linear-gradient(135deg, var(--swatch-dark) 50%, var(--swatch-light) 50%); }
+.tint-choice[data-tint="database"] .tint-swatch::before { background: var(--db); }
 
 /* A theme change grows out of the button that asked for it, as a circle of
    the new colours over the old. app.js sets --tx and --ty to the button. */
@@ -826,23 +856,26 @@ input[type="checkbox"] { accent-color: var(--accent); }
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 20px;
+  padding: 10px 20px;
   border-bottom: 1px solid var(--line);
+  background: var(--glass);
   flex-wrap: wrap;
 }
 .toolbar-label { margin-left: 6px; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
 .search { position: relative; display: flex; align-items: center; }
 .search .i { position: absolute; left: 11px; color: var(--faint); pointer-events: none; }
 .search input { padding-left: 34px; width: 300px; }
+/* Level with the buttons beside it. */
+.toolbar .search input { height: 32px; }
 .filter-bar { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 20px; }
-.filter-bar:not(:empty) { padding: 10px 20px; border-bottom: 1px solid var(--line); }
+.filter-bar:not(:empty) { padding: 10px 20px; border-bottom: 1px solid var(--line); background: var(--glass); }
 .filter {
   display: flex;
   align-items: center;
   gap: 4px;
   padding: 3px;
   border: 1px solid var(--accent-line);
-  border-radius: 11px;
+  border-radius: var(--r-lg);
   background: var(--accent-faint);
 }
 .filter .input { height: 28px; font-size: 12.5px; }
@@ -858,19 +891,19 @@ input[type="checkbox"] { accent-color: var(--accent); }
   align-items: center;
   gap: 8px;
   padding: 8px 20px;
-  background: var(--accent-soft);
-  border-bottom: 1px solid var(--accent-line);
+  background: var(--accent-faint);
+  border-bottom: 1px solid var(--line);
   color: var(--accent-ink);
   flex-wrap: wrap;
-  animation: bar-in .35s var(--spring);
+  animation: bar-in var(--normal) var(--ease-out);
 }
-@keyframes bar-in { from { opacity: 0; transform: translateY(-6px); } }
+@keyframes bar-in { from { opacity: 0; } }
 .select-bar .btn.ghost { color: var(--accent-ink); }
 .pager {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 50px;
+  min-height: 44px;
   padding: 0 20px;
   border-top: 1px solid var(--line);
   background: var(--glass);
@@ -902,24 +935,23 @@ table.grid {
   min-width: 100%;
   font-variant-numeric: tabular-nums;
 }
-/* Rows slide under the header, so it is the one place the grid blurs. */
 .grid th {
   position: sticky;
   top: 0;
   z-index: 1;
-  background: color-mix(in oklab, var(--surface) 82%, transparent);
-  backdrop-filter: blur(12px) saturate(1.3);
+  /* A shade off the rows, so the header reads as its own band. Opaque, so rows pass under it cleanly. */
+  background: var(--sunken);
   text-align: left;
   font-weight: 600;
-  font-size: 12.5px;
+  font-size: 12px;
   color: var(--ink-2);
-  padding: 10px 14px 9px;
+  padding: 7px 12px 6px;
   border-bottom: 1px solid var(--line);
   white-space: nowrap;
   vertical-align: top;
 }
 .grid th.sortable { cursor: pointer; user-select: none; }
-.grid th.sortable:hover { color: var(--ink); background: var(--row-hover); }
+.grid th.sortable:hover { color: var(--ink); background: color-mix(in oklab, var(--ink) 5%, var(--sunken)); }
 .grid th.sorted { color: var(--accent-ink); }
 /* The header casts a shadow once the rows slide under it. The browser drives it from the scroll position, so there is no scroll listener. */
 @supports (animation-timeline: scroll()) {
@@ -936,8 +968,13 @@ table.grid {
 .th .pk { color: var(--warn); }
 .th .fk { color: var(--accent); }
 .th-type { font-size: 11px; font-weight: 400; color: var(--faint); margin-top: 1px; }
+/* A line between columns in the data grid, as in a spreadsheet, so a value is easy to follow down and across. Lists, such as the tables of a database, keep only their row lines. */
+.grid.sheet th:not(.pick), .grid.sheet td:not(.pick) { border-right: 1px solid var(--line-soft); }
+/* The corner cells take the band too: the gutter's own background would leave them white. */
+.grid th.pick, .grid th.rownum { vertical-align: middle; background: var(--sunken); }
+.grid th.rownum { font-weight: 600; }
 .grid td {
-  padding: 8px 14px;
+  padding: 6px 12px;
   border-bottom: 1px solid var(--line-soft);
   max-width: 340px;
   overflow: hidden;
@@ -952,12 +989,12 @@ table.grid {
 .grid tbody tr.picked { background: var(--row-picked); }
 .grid tbody tr.selected { background: var(--row-selected); }
 .grid tbody tr.selected > td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
-.grid td.active { box-shadow: inset 0 0 0 2px var(--accent), inset 0 0 14px -6px var(--accent-glow); }
+.grid td.active { box-shadow: inset 0 0 0 2px var(--accent); }
 .grid-wrap:not(:focus-within) .grid td.active { box-shadow: inset 0 0 0 2px var(--line-strong); }
 .grid.has-pick tbody { user-select: none; }
-/* Rows just loaded come in one after another, out of a slight blur. */
-.grid tbody tr.enter { animation: row-in .45s var(--ease-out) both; animation-delay: calc(var(--i, 0) * 18ms); }
-@keyframes row-in { from { opacity: 0; transform: translateY(6px); filter: blur(3px); } }
+/* Rows just loaded fade in together. */
+.grid tbody tr.enter { animation: row-in var(--normal) var(--ease-out) both; }
+@keyframes row-in { from { opacity: 0; } }
 /* Deleted rows fold away before the list reloads. */
 .grid tbody tr.folding td { animation: fold .28s var(--ease-in) forwards; }
 .grid tbody tr.folding .pick input, .grid tbody tr.folding .i { visibility: hidden; }
@@ -973,8 +1010,10 @@ table.grid {
   color: var(--faint);
   text-align: right;
   min-width: 50px;
-  font-size: 11.5px;
+  font: 11px var(--mono);
 }
+/* The line after the row numbers is a step stronger, so they read as a margin and not as a column of data. */
+.grid th.rownum, .grid td.rownum { border-right-color: var(--line); }
 .grid th.rownum { z-index: 2; }
 .grid .pick {
   position: sticky;
@@ -1002,9 +1041,8 @@ table.grid {
   bottom: 8px;
   left: 3px;
   width: 2px;
-  border-radius: 2px;
+  border-radius: var(--r-xs);
   background: var(--accent);
-  box-shadow: 0 0 8px var(--accent);
 }
 .grid th:hover .resize::before {
   content: "";
@@ -1021,12 +1059,12 @@ body.resizing { cursor: col-resize; user-select: none; }
 @keyframes flash { from { background: var(--ok-soft); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--ok) 35%, transparent); } }
 
 .null { color: var(--faint); font-size: 10.5px; font-weight: 600; letter-spacing: .03em; }
-.bool { font-size: 11.5px; font-weight: 600; padding: 1px 8px; border-radius: 999px; }
+.bool { font-size: 11.5px; font-weight: 600; padding: 1px 7px; border-radius: var(--r-xs); }
 .bool.yes { background: var(--ok-soft); color: var(--ok); }
 .bool.no { background: var(--field); color: var(--muted); border: 1px solid var(--line); }
 .fk-link { color: var(--ink-2); text-decoration: underline dotted var(--accent-line); text-underline-offset: 3px; }
 .fk-link:hover { color: var(--accent-ink); text-decoration: underline solid var(--accent); }
-mark { background: var(--mark); color: inherit; border-radius: 3px; padding: 0 1px; }
+mark { background: var(--mark); color: inherit; border-radius: var(--r-xs); padding: 0 1px; }
 .empty { padding: 64px 16px; text-align: center; color: var(--muted); font-size: 14px; }
 
 /* Editing a cell in place */
@@ -1055,7 +1093,6 @@ textarea.cell-input { resize: both; min-height: 130px; font: 12.5px/1.55 var(--m
   padding: 5px 8px;
   width: max-content;
   background: var(--glass-strong);
-  backdrop-filter: blur(18px);
   border: 1px solid var(--line-strong);
   border-radius: var(--r);
   box-shadow: var(--shadow);
@@ -1070,10 +1107,9 @@ textarea.cell-input { resize: both; min-height: 130px; font: 12.5px/1.55 var(--m
   position: fixed;
   z-index: 40;
   background: var(--glass-strong);
-  backdrop-filter: blur(22px) saturate(1.5);
   border: 1px solid var(--line-strong);
   border-radius: var(--r-lg);
-  box-shadow: var(--shadow), inset 0 1px 0 var(--shine);
+  box-shadow: var(--shadow);
   max-height: min(72vh, 560px);
   overflow: auto;
   animation: pop .26s var(--spring);
@@ -1136,14 +1172,24 @@ textarea.cell-input { resize: both; min-height: 130px; font: 12.5px/1.55 var(--m
   white-space: nowrap;
 }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--faint); flex-shrink: 0; }
-.menu-item .dot { box-shadow: 0 0 8px currentColor; }
 
-/* The database list. The search stays on top and the buttons at the bottom
-   while the groups scroll between them. */
-.db-menu-search, .db-menu-foot { position: sticky; z-index: 1; background: var(--glass-strong); }
-.db-menu-search { top: -6px; padding: 6px 2px 4px; margin-top: -6px; }
+/* The database list. The search on top and the buttons at the bottom stay
+   where they are, and only the groups between them scroll, so no row ever
+   shows through behind them. */
+.popover.db-popover { display: flex; overflow: hidden; }
+.db-menu { width: 100%; max-height: min(72vh, 560px); padding: 0; gap: 0; }
+.db-menu-search { padding: 8px 8px 6px; }
 .db-menu-search .input { width: 100%; }
-.db-menu-foot { bottom: -6px; display: flex; justify-content: space-between; gap: 6px; padding: 6px 2px; margin: 4px 0 -6px; border-top: 1px solid var(--line); }
+.db-groups { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 0 6px 6px; }
+.db-menu-foot { display: flex; justify-content: space-between; gap: 6px; padding: 6px 8px; border-top: 1px solid var(--line); }
+/* Group names read as headings, in the style of the Databases label, with a line between groups. */
+.db-groups .menu-group + .menu-group { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--line-soft); }
+.db-groups .menu-head { padding: 8px 8px 4px; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+.db-groups .menu-head:hover { color: var(--ink-2); }
+.db-groups .menu-head .count { letter-spacing: 0; font-variant-numeric: tabular-nums; }
+.db-groups .menu-item { min-height: 30px; }
+/* The colour each database paints the page in, as a small flat mark rather than a light. */
+.db-groups .menu-item .dot { width: 7px; height: 7px; box-shadow: none; }
 .menu-empty { padding: 4px 10px 8px; color: var(--faint); font-size: 12px; }
 .menu-group .menu-head { border-radius: var(--r-sm); }
 .menu-group.is-hidden .menu-item { color: var(--muted); }
@@ -1156,6 +1202,17 @@ textarea.cell-input { resize: both; min-height: 130px; font: 12.5px/1.55 var(--m
 .check { display: flex; align-items: center; gap: 9px; padding: 5px 8px; border-radius: var(--r-sm); cursor: pointer; }
 .check:hover { background: var(--hover); }
 .check span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* Compare two databases. */
+.compare-pick { display: flex; align-items: center; gap: 10px; }
+.compare-pick select { flex: 1; min-width: 0; }
+.compare-out { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.compare-group h4 { margin: 0 0 6px; font-size: 12.5px; font-weight: 600; }
+.compare-names { font-size: 12.5px; color: var(--ink-2); overflow-wrap: anywhere; }
+.compare-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.compare-table td { padding: 4px 8px 4px 0; border-top: 1px solid var(--line-soft); vertical-align: top; }
+.compare-sql { margin: 0; max-height: 260px; overflow: auto; padding: 12px 14px; background: var(--sunken); border: 1px solid var(--line); border-radius: var(--r-sm); font-size: 12px; line-height: 1.6; white-space: pre; }
+/* The tables a backup takes, which can be a few hundred. */
+.backup-list { max-height: 280px; overflow: auto; border: 1px solid var(--line); border-radius: var(--r-sm); padding: 4px; }
 .check small { color: var(--faint); font-size: 11px; }
 .check input { margin: 0; }
 .history-menu { width: 480px; }
@@ -1172,6 +1229,9 @@ textarea.cell-input { resize: both; min-height: 130px; font: 12.5px/1.55 var(--m
 .history-item:hover { background: var(--hover); }
 .history-item code { display: block; font: 12.5px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .history-item small { color: var(--faint); }
+.history-item b { display: block; font-weight: 600; }
+.saved-item { display: flex; align-items: center; gap: 2px; }
+.saved-item .history-item { flex: 1; min-width: 0; }
 
 /* ------------------------------------------------------------------ drawer */
 
@@ -1185,7 +1245,6 @@ textarea.cell-input { resize: both; min-height: 130px; font: 12.5px/1.55 var(--m
   display: flex;
   flex-direction: column;
   background: var(--glass-strong);
-  backdrop-filter: blur(26px) saturate(1.4);
   border-left: 1px solid var(--line-strong);
   box-shadow: -30px 0 80px -30px var(--lift);
   transform: translateX(105%);
@@ -1200,10 +1259,9 @@ textarea.cell-input { resize: both; min-height: 130px; font: 12.5px/1.55 var(--m
   gap: 4px;
   padding: 14px 14px 14px 22px;
   border-bottom: 1px solid var(--line);
-  box-shadow: inset 0 2px 0 var(--accent), inset 0 14px 24px -18px var(--accent-glow);
 }
 .drawer-title { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.drawer-title b { font: 650 16px var(--display); letter-spacing: -.01em; }
+.drawer-title b { font: 600 16px var(--display); letter-spacing: -.01em; }
 .drawer-title small { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .drawer-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 22px; border-bottom: 1px solid var(--line); background: var(--hover); }
 .drawer-body { flex: 1; overflow: auto; padding: 6px 22px 28px; animation: fade .25s var(--ease-out); }
@@ -1270,12 +1328,12 @@ pre.code {
   align-items: flex-end;
   gap: 32px;
   flex-wrap: wrap;
-  padding: 34px 28px 26px;
+  padding: 24px 28px 20px;
   border-bottom: 1px solid var(--line);
 }
 .ov-kind { display: flex; align-items: center; gap: 8px; color: var(--db-ink); font-weight: 600; font-size: 13px; margin-bottom: 6px; }
-.ov-kind .dot { background: var(--db-mark); box-shadow: 0 0 0 3px var(--db-soft), 0 0 12px var(--db-mark); }
-.ov-head h1 { font-size: 34px; line-height: 1.12; letter-spacing: -.03em; }
+.ov-kind .dot { background: var(--db-mark); }
+.ov-head h1 { font-size: 24px; line-height: 1.2; letter-spacing: -.015em; }
 .ov-sub { margin-top: 6px; color: var(--muted); }
 .ov-sub .faint { margin-left: 10px; font: 12px var(--mono); }
 
@@ -1283,7 +1341,7 @@ pre.code {
 .stats { display: flex; gap: 32px; margin-left: auto; flex-wrap: wrap; }
 .stat { display: flex; flex-direction: column; min-width: 0; }
 .stat b {
-  font: 650 24px/1.2 var(--display);
+  font: 600 20px/1.25 var(--display);
   letter-spacing: -.02em;
   font-variant-numeric: tabular-nums;
   background: var(--number);
@@ -1303,14 +1361,14 @@ pre.code {
 .overview-table td.comment { max-width: 520px; color: var(--muted); }
 .overview-table td.num { padding-right: 28px; position: relative; }
 .row-actions { display: flex; gap: 4px; white-space: nowrap; }
-/* Each button in its own colour, from the pairs above, so the actions read at a glance. */
+/* Quiet until the pointer is on one, then in its own colour, so a list of rows does not shout. */
 .row-actions .btn {
   --tone-line: color-mix(in oklab, var(--tone) 35%, transparent);
-  --tone-strong: color-mix(in oklab, var(--tone) 18%, transparent);
   height: 28px; padding: 0 9px; gap: 5px; font-size: 12.5px; font-weight: 500;
-  border-color: transparent; box-shadow: none; color: var(--tone); background: var(--tone-soft);
+  border-color: transparent; box-shadow: none; color: var(--muted); background: none;
 }
-.row-actions .btn:hover:not(:disabled) { color: var(--tone); border-color: var(--tone-line); background: var(--tone-strong); }
+.row-actions .btn .i { color: inherit; }
+.row-actions .btn:hover:not(:disabled) { color: var(--tone); border-color: var(--tone-line); background: var(--tone-soft); }
 .row-actions .btn.icon-only { width: 28px; padding: 0; }
 .row-actions .neutral { --tone: var(--muted); --tone-soft: var(--hover); }
 .row-actions .accent { --tone: var(--accent-ink); --tone-soft: var(--accent-soft); }
@@ -1318,7 +1376,7 @@ pre.code {
 .row-actions .warn { --tone: var(--warn); --tone-soft: var(--warn-soft); }
 .row-actions .danger { --tone: var(--danger); --tone-soft: var(--danger-soft); }
 /* A line under a row count, so the biggest tables stand out. */
-.meter { position: absolute; right: 28px; bottom: 5px; height: 3px; border-radius: 3px; background: var(--accent-line); box-shadow: 0 0 8px var(--accent-glow); }
+.meter { position: absolute; right: 28px; bottom: 5px; height: 3px; border-radius: var(--r-xs); background: var(--accent-line); }
 
 /* ----------------------------------------------------------------- find id */
 
@@ -1332,8 +1390,8 @@ pre.code {
 .find-results .skeleton { padding: 0; }
 .find-summary { margin: 4px 0 0; }
 .find-empty { display: flex; flex-direction: column; gap: 4px; padding: 22px; border: 1px dashed var(--line-strong); border-radius: var(--r-lg); }
-/* The cards rise in one after another. --i is set by app.js. */
-.find-table { border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); overflow: hidden; animation: rise .4s var(--ease-out) both; animation-delay: calc(var(--i, 0) * 35ms); }
+/* Each table of results fades in as it arrives. */
+.find-table { border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); overflow: hidden; animation: rise var(--normal) var(--ease-out) both; }
 .find-table header { display: flex; align-items: center; gap: 9px; padding: 10px 16px; background: var(--sunken); border-bottom: 1px solid var(--line); }
 .find-table header .i { color: var(--faint); }
 .find-hit { display: flex; align-items: center; gap: 12px; padding: 10px 16px; color: var(--ink); transition: background var(--fast); }
@@ -1351,41 +1409,21 @@ pre.code {
 .find-db { display: flex; flex-direction: column; gap: 10px; }
 .find-db + .find-db { padding-top: 14px; border-top: 1px solid var(--line); }
 .find-db-head { display: flex; align-items: center; gap: 9px; }
-.find-db-head .dot { background: var(--c); box-shadow: 0 0 8px var(--c); }
+.find-db-head .dot { background: var(--c); }
 .find-db-head .muted { margin-left: auto; }
 .find-none { padding-top: 12px; border-top: 1px solid var(--line); }
 
 /* --------------------------------------------------------------- structure */
 
 .structure { padding: 24px 28px; display: flex; flex-direction: column; gap: 20px; }
-/* The cards of a view rise in one after another. */
-.structure > * { animation: rise .5s var(--ease-out) both; }
-.structure > :nth-child(2) { animation-delay: 50ms; }
-.structure > :nth-child(3) { animation-delay: 100ms; }
-.structure > :nth-child(4) { animation-delay: 150ms; }
-.structure > :nth-child(5) { animation-delay: 200ms; }
-.structure > :nth-child(6) { animation-delay: 250ms; }
-.structure > :nth-child(n + 7) { animation-delay: 300ms; }
-@keyframes rise { from { opacity: 0; transform: translateY(12px); } }
+@keyframes rise { from { opacity: 0; } }
 .card {
   position: relative;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
-  box-shadow: inset 0 1px 0 var(--shine), 0 24px 44px -34px var(--lift);
   overflow: hidden;
 }
-/* A faint light in the database colour follows the pointer. app.js keeps --mx and --my up to date. */
-.card::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background: radial-gradient(420px circle at var(--mx, -999px) var(--my, -999px), color-mix(in oklab, var(--hue) 9%, transparent), transparent 65%);
-  opacity: 0;
-  transition: opacity var(--slow);
-}
-.card:hover::before { opacity: 1; }
 .card-head { display: flex; align-items: center; gap: 8px; padding: 14px 18px; border-bottom: 1px solid var(--line); }
 .card-head h3 { font-size: 14.5px; }
 .card-body { padding: 18px; }
@@ -1421,6 +1459,12 @@ table.dense { border-collapse: collapse; width: 100%; }
 .sql-result { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .sql-result > .callout { margin: 16px 20px; }
 .sql-status { display: flex; align-items: center; gap: 10px; padding: 10px 20px; font-size: 12.5px; border-bottom: 1px solid var(--line); background: var(--glass); }
+.result-switch { margin-left: auto; }
+/* A query result as a chart, in place of the grid. */
+.result-chart { flex: 1; min-height: 0; overflow: auto; padding: 0 20px 16px; }
+.result-chart > .toolbar { padding-left: 0; padding-right: 0; }
+.result-chart label { display: inline-flex; align-items: center; gap: 6px; }
+.result-chart-body { padding-top: 6px; }
 .plan { margin: 0; padding: 18px 22px; font: 12.5px/1.6 var(--mono); white-space: pre; overflow: auto; flex: 1; background: var(--surface); }
 .switch { display: inline-flex; align-items: center; gap: 9px; cursor: pointer; user-select: none; color: var(--muted); margin-left: 6px; }
 .switch input { position: absolute; opacity: 0; pointer-events: none; }
@@ -1437,7 +1481,7 @@ table.dense { border-collapse: collapse; width: 100%; }
   box-shadow: var(--shadow-sm);
   transition: transform .35s var(--spring);
 }
-.switch input:checked + .track { background: var(--danger-solid); box-shadow: 0 0 12px -2px var(--danger); }
+.switch input:checked + .track { background: var(--danger-solid); }
 .switch input:checked + .track::after { transform: translateX(14px); }
 .switch input:focus-visible + .track { box-shadow: 0 0 0 3px var(--focus); }
 .switch.on { color: var(--danger); font-weight: 600; }
@@ -1449,7 +1493,6 @@ table.dense { border-collapse: collapse; width: 100%; }
   inset: 0;
   z-index: 50;
   background: var(--scrim);
-  backdrop-filter: blur(6px) saturate(1.2);
   display: flex;
   align-items: flex-start;
   justify-content: center;
@@ -1460,15 +1503,14 @@ table.dense { border-collapse: collapse; width: 100%; }
 .overlay.leaving .modal, .overlay.leaving .palette { animation: sink-out .16s var(--ease-in) forwards; }
 @keyframes fade { from { opacity: 0; } }
 @keyframes fade-out { to { opacity: 0; } }
-@keyframes rise-in { from { opacity: 0; transform: translateY(14px) scale(.97); } }
+@keyframes rise-in { from { opacity: 0; transform: translateY(6px); } }
 @keyframes sink-out { to { opacity: 0; transform: translateY(8px) scale(.98); } }
 .modal {
   width: min(460px, 92vw);
   background: var(--glass-strong);
-  backdrop-filter: blur(24px) saturate(1.4);
   border: 1px solid var(--line-strong);
   border-radius: var(--r-xl);
-  box-shadow: var(--shadow), inset 0 1px 0 var(--shine);
+  box-shadow: var(--shadow);
   padding: 22px 24px;
   animation: rise-in .38s var(--spring);
 }
@@ -1518,10 +1560,9 @@ table.dense { border-collapse: collapse; width: 100%; }
 .palette {
   width: min(640px, 92vw);
   background: var(--glass-strong);
-  backdrop-filter: blur(26px) saturate(1.5);
   border: 1px solid var(--line-strong);
   border-radius: var(--r-xl);
-  box-shadow: var(--shadow), 0 0 80px -30px var(--accent-glow), inset 0 1px 0 var(--shine);
+  box-shadow: var(--shadow);
   overflow: hidden;
   animation: rise-in .34s var(--spring);
 }
@@ -1584,24 +1625,23 @@ table.dense { border-collapse: collapse; width: 100%; }
   padding: 11px 14px 13px;
   border-radius: var(--r-lg);
   background: var(--glass-strong);
-  backdrop-filter: blur(20px) saturate(1.4);
   color: var(--ink);
   border: 1px solid var(--line-strong);
-  box-shadow: var(--shadow), inset 0 1px 0 var(--shine);
+  box-shadow: var(--shadow);
   white-space: pre-wrap;
   word-break: break-word;
   animation: toast-in .5s var(--spring);
   transition: opacity .25s, transform .25s var(--ease-in);
 }
-@keyframes toast-in { from { opacity: 0; transform: translateY(18px) scale(.95); } }
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
 .toast .i { margin-top: 2px; }
 .toast.ok .i { color: var(--ok); }
 .toast.error { background: var(--danger-solid); color: #fff; border-color: transparent; }
 .toast.out { opacity: 0; transform: translateY(6px) scale(.98); }
 /* "Now on shop": a dot in the new database colour. */
-.toast-dot { width: 9px; height: 9px; margin-top: 5px; border-radius: 50%; background: var(--db); box-shadow: 0 0 0 3px color-mix(in oklab, var(--db) 30%, transparent), 0 0 14px var(--db); flex: none; }
+.toast-dot { width: 9px; height: 9px; margin-top: 5px; border-radius: 50%; background: var(--db); flex: none; }
 /* The line along the bottom runs down while the toast stays. --life is set by app.js. */
-.toast-life { position: absolute; left: 12px; right: 12px; bottom: 4px; height: 2px; border-radius: 2px; background: currentColor; opacity: .22; transform-origin: left; animation: life var(--life, 2600ms) linear forwards; }
+.toast-life { position: absolute; left: 12px; right: 12px; bottom: 4px; height: 2px; border-radius: var(--r-xs); background: currentColor; opacity: .22; transform-origin: left; animation: life var(--life, 2600ms) linear forwards; }
 @keyframes life { to { transform: scaleX(0); } }
 .toast button {
   margin-left: 6px;
@@ -1626,14 +1666,12 @@ table.dense { border-collapse: collapse; width: 100%; }
   gap: 16px;
   padding: 32px 30px 28px;
   background: var(--glass-strong);
-  backdrop-filter: blur(24px) saturate(1.4);
   border: 1px solid var(--line-strong);
   border-radius: var(--r-xl);
-  box-shadow: var(--shadow), 0 0 90px -30px var(--accent-glow), inset 0 1px 0 var(--shine);
+  box-shadow: var(--shadow);
   overflow: hidden;
   animation: rise-in .6s var(--spring);
 }
-.login::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 2px; background: linear-gradient(90deg, transparent, var(--accent), transparent); }
 .login .brand { padding: 0; font-size: 19px; }
 .login .brand .i { width: 22px; height: 22px; }
 .login p { margin: -8px 0 0; }
@@ -1651,7 +1689,7 @@ table.dense { border-collapse: collapse; width: 100%; }
   display: block;
   height: 14px;
   width: var(--w, 70%);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   background: linear-gradient(90deg, var(--hover) 0%, color-mix(in oklab, var(--ink) 10%, transparent) 40%, var(--hover) 80%) 0 0 / 300% 100%;
   animation: shimmer 1.4s linear infinite;
 }
@@ -1667,7 +1705,7 @@ table.dense { border-collapse: collapse; width: 100%; }
 @media (max-width: 800px) {
   #app { grid-template-columns: 1fr; }
   .side { display: none; }
-  .top { overflow-x: auto; gap: 12px; }
+  .top { overflow-x: auto; overflow-y: hidden; gap: 12px; }
   .search input { width: 200px; }
   .stats { margin-left: 0; }
 }
@@ -1683,7 +1721,6 @@ select.cell-input { min-width: 160px; }
   overflow: auto;
   padding: 4px;
   background: var(--glass-strong);
-  backdrop-filter: blur(18px);
   border: 1px solid var(--line-strong);
   border-radius: var(--r);
   box-shadow: var(--shadow);
@@ -1770,8 +1807,8 @@ select.cell-input { min-width: 160px; }
   animation-delay: calc(var(--i, 0) * 60ms);
 }
 @keyframes node-in { from { opacity: 0; transform: translateY(10px) scale(.96); } }
-.erd-node.hot, .erd-node:hover { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus), 0 12px 30px -16px var(--accent-glow); }
-.erd-node.center { cursor: default; min-width: 250px; border-color: var(--accent-line); box-shadow: 0 0 0 4px var(--accent-faint), 0 16px 40px -18px var(--accent-glow); }
+.erd-node.hot, .erd-node:hover { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus); }
+.erd-node.center { cursor: default; min-width: 250px; border-color: var(--accent-line); box-shadow: 0 0 0 4px var(--accent-faint); }
 .erd-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line-soft); background: var(--hover); }
 .erd-node.center .erd-head { background: var(--accent-soft); color: var(--accent-ink); }
 .erd-head .i { width: 14px; height: 14px; color: var(--accent); }
@@ -1803,12 +1840,11 @@ select.cell-input { min-width: 160px; }
   padding: 18px;
   border-radius: var(--r-lg);
   background: var(--glass-strong);
-  backdrop-filter: blur(18px);
   box-shadow: inset 0 0 0 1px var(--line-strong), var(--shadow);
   overflow: auto;
   overscroll-behavior: contain;
 }
-.dg-start h3 { margin: 0; font-size: 15px; font-weight: 650; }
+.dg-start h3 { margin: 0; font-size: 15px; font-weight: 600; }
 .dg-start p { margin: 0; font-size: 13px; line-height: 1.5; }
 .dg-start .search input { width: 100%; }
 .dg-start .menu { padding: 0; }
@@ -1823,14 +1859,14 @@ select.cell-input { min-width: 160px; }
 .dg-edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .dg-stage.on-line { cursor: help; }
 
-.dg-group { position: absolute; left: 0; top: 0; border-radius: 18px; border: 1px dashed var(--line-strong); background: var(--accent-faint); transition: opacity .4s; }
+.dg-group { position: absolute; left: 0; top: 0; border-radius: var(--r-xl); border: 1px dashed var(--line-strong); background: var(--accent-faint); transition: opacity .4s; }
 .dg-group.gone { opacity: 0; }
 .dg-group b {
   position: absolute;
   left: 14px;
   bottom: calc(100% + 6px);
   font-size: calc(11px * min(var(--inv, 1), 2.8));
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: .1em;
   text-transform: uppercase;
   color: var(--muted);
@@ -1846,7 +1882,7 @@ select.cell-input { min-width: 160px; }
   top: 0;
   width: 220px;
   border: 1px solid var(--line-strong);
-  border-radius: 10px;
+  border-radius: var(--r-lg);
   background: var(--surface);
   box-shadow: 0 14px 34px -18px var(--lift);
   cursor: pointer;
@@ -1855,21 +1891,21 @@ select.cell-input { min-width: 160px; }
 .dg-node.pre { opacity: 0; scale: .9; }
 .dg-node header { display: flex; align-items: center; gap: 7px; height: 36px; padding: 0 11px; border-bottom: 1px solid var(--line-soft); }
 .dg-node.bare header { border-bottom-color: transparent; }
-.dg-node header i { width: 7px; height: 7px; border-radius: 2px; background: var(--accent); opacity: .75; flex: none; }
+.dg-node header i { width: 7px; height: 7px; border-radius: var(--r-xs); background: var(--accent); opacity: .75; flex: none; }
 .dg-node.is-view header i { background: transparent; box-shadow: inset 0 0 0 1.5px var(--accent); }
 .dg-node header b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-weight: 620; }
 .dg-node header small { font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.dg-node.empty header b { font-weight: 520; color: var(--ink-2); }
+.dg-node.empty header b { font-weight: 500; color: var(--ink-2); }
 .dg-cols { padding-bottom: 6px; }
 .dg-col { display: flex; align-items: center; gap: 6px; height: 22px; padding: 0 11px; font: 11px var(--mono); color: var(--ink-2); }
 .dg-col span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dg-col em { font: 700 8.5px var(--sans); font-style: normal; padding: 1px 4px; border-radius: 3px; background: var(--warn-soft); color: var(--warn); letter-spacing: .03em; }
+.dg-col em { font: 700 8.5px var(--sans); font-style: normal; padding: 1px 4px; border-radius: var(--r-xs); background: var(--warn-soft); color: var(--warn); letter-spacing: .03em; }
 .dg-col em.fk { background: var(--accent-soft); color: var(--accent-ink); }
 .dg-col small { max-width: 92px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: var(--faint); }
 .dg-node:hover { border-color: var(--accent-line); }
-.dg-node.lit { border-color: var(--accent-line); box-shadow: 0 0 0 1px var(--accent-line), 0 16px 44px -14px var(--accent-glow); }
-.dg-node.focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent), 0 0 60px -8px var(--accent-glow); }
-.dg-node.focus header { background: var(--accent-soft); border-radius: 9px 9px 0 0; }
+.dg-node.lit { border-color: var(--accent-line); box-shadow: 0 0 0 1px var(--accent-line); }
+.dg-node.focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+.dg-node.focus header { background: var(--accent-soft); border-radius: var(--r-lg) var(--r-lg) 0 0; }
 .dg-node.match { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-line); }
 .focusing .dg-node:not(.lit):not(.focus), .searching .dg-node:not(.match) { opacity: .14; filter: saturate(.2); }
 .dg-node.dragging { z-index: 5; transition: none; box-shadow: 0 30px 60px -20px var(--lift), 0 0 0 1px var(--accent-line); }
@@ -1884,7 +1920,7 @@ select.cell-input { min-width: 160px; }
   translate: -50% -50%;
   overflow-wrap: anywhere;
   text-align: center;
-  font-weight: 650;
+  font-weight: 600;
   font-size: calc(12px * min(var(--inv, 1), 3.4, var(--fit, 3.4)));
   line-height: 1.05;
   letter-spacing: -.01em;
@@ -1912,11 +1948,10 @@ select.cell-input { min-width: 160px; }
   align-items: center;
   height: 30px;
   padding: 0 10px;
-  border-radius: 9px;
+  border-radius: var(--r-lg);
   font-size: 12px;
   color: var(--muted);
   background: var(--glass-strong);
-  backdrop-filter: blur(12px);
   box-shadow: inset 0 0 0 1px var(--line);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
@@ -1959,24 +1994,22 @@ select.cell-input { min-width: 160px; }
   font: 600 12.5px var(--mono);
   color: var(--accent-ink);
   background: var(--glass-strong);
-  backdrop-filter: blur(12px);
   box-shadow: inset 0 0 0 1px var(--accent-line);
   max-width: 280px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.dg-bar .btn { background: var(--glass-strong); backdrop-filter: blur(12px); }
+.dg-bar .btn { background: var(--glass-strong); }
 .dg-btn {
   display: grid;
   place-items: center;
   width: 30px;
   height: 30px;
   border: 0;
-  border-radius: 9px;
+  border-radius: var(--r-lg);
   color: var(--ink-2);
   background: var(--glass-strong);
-  backdrop-filter: blur(12px);
   box-shadow: inset 0 0 0 1px var(--line);
   cursor: pointer;
   transition: background var(--fast), color var(--fast), transform var(--fast);
@@ -1990,9 +2023,8 @@ select.cell-input { min-width: 160px; }
   z-index: 3;
   width: 220px;
   height: 140px;
-  border-radius: 12px;
+  border-radius: var(--r-xl);
   background: var(--glass-strong);
-  backdrop-filter: blur(14px);
   box-shadow: inset 0 0 0 1px var(--line), 0 16px 40px -16px var(--lift);
   cursor: pointer;
 }
@@ -2002,9 +2034,8 @@ select.cell-input { min-width: 160px; }
   top: 0;
   z-index: 9;
   padding: 6px 10px;
-  border-radius: 8px;
+  border-radius: var(--r);
   background: var(--glass-strong);
-  backdrop-filter: blur(10px);
   box-shadow: inset 0 0 0 1px var(--line-strong), 0 10px 30px -10px var(--lift);
   font: 11.5px var(--mono);
   color: var(--ink);
@@ -2017,7 +2048,7 @@ select.cell-input { min-width: 160px; }
 
 /* ------------------------------------------------------------- charts */
 
-.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: var(--r-xs); flex-shrink: 0; }
 .swatch.s1, .bar-seg.s1 { background: var(--s1); }
 .swatch.s2, .bar-seg.s2 { background: var(--s2); }
 .swatch.s3, .bar-seg.s3 { background: var(--s3); }
@@ -2049,11 +2080,11 @@ select.cell-input { min-width: 160px; }
 .bar { display: flex; gap: 2px; height: 14px; transform-origin: left; animation: grow .8s var(--ease-out) both; }
 @keyframes grow { from { transform: scaleX(0); } }
 .bar-seg { flex-basis: 0; min-width: 2px; }
-.bar-seg:last-child { border-radius: 0 4px 4px 0; }
+.bar-seg:last-child { border-radius: 0 var(--r-sm) var(--r-sm) 0; }
 .bar-value { min-width: 60px; text-align: right; font: 12px var(--mono); color: var(--ink-2); font-variant-numeric: tabular-nums; }
 
 .chart-body { padding: 14px 18px 12px; }
-.chart-now { font: 650 15px var(--display); font-variant-numeric: tabular-nums; }
+.chart-now { font: 600 15px var(--display); font-variant-numeric: tabular-nums; }
 .chart-plot { position: relative; }
 .chart-svg { display: block; width: 100%; overflow: visible; }
 .chart-grid { stroke: var(--line); stroke-width: 1; }
@@ -2072,7 +2103,6 @@ select.cell-input { min-width: 160px; }
   padding: 6px 10px;
   border-radius: var(--r-sm);
   background: var(--glass-strong);
-  backdrop-filter: blur(14px);
   border: 1px solid var(--line-strong);
   color: var(--ink);
   font-size: 12px;
@@ -2100,7 +2130,7 @@ select.cell-input { min-width: 160px; }
 
 .activity > .toolbar { padding: 12px 28px; }
 /* The live dot sends out a ring every few seconds. */
-.live-dot { position: relative; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 10px var(--ok); }
+.live-dot { position: relative; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
 .live-dot::after { content: ""; position: absolute; inset: -4px; border-radius: 50%; border: 2px solid var(--ok); opacity: 0; animation: ping 1.8s var(--ease-out) infinite; }
 @keyframes ping { 0% { transform: scale(.5); opacity: .8; } 100% { transform: scale(1.8); opacity: 0; } }
 .activity > .toolbar > span:not(.live-dot) { color: var(--muted); font-size: 12.5px; }
@@ -2158,7 +2188,6 @@ select.cell-input { min-width: 160px; }
   border: 1px solid var(--line-strong);
   border-radius: var(--r);
   background: var(--glass-strong);
-  backdrop-filter: blur(22px) saturate(1.4);
   color: var(--ink);
   font: 13px/1.45 var(--sans);
   box-shadow: var(--shadow);
@@ -2176,7 +2205,6 @@ select.cell-input { min-width: 160px; }
   border: 1px solid var(--line-strong);
   border-radius: var(--r-lg);
   background: var(--glass-strong);
-  backdrop-filter: blur(22px) saturate(1.4);
   box-shadow: var(--shadow);
   font-family: var(--sans);
 }
@@ -2192,7 +2220,7 @@ span.flatpickr-weekday { color: var(--faint); font-weight: 600; }
 .flatpickr-day { color: var(--ink); border-radius: var(--r-sm); }
 .flatpickr-day:hover, .flatpickr-day:focus { background: var(--hover); border-color: transparent; }
 .flatpickr-day.today { border-color: var(--accent-line); }
-.flatpickr-day.selected, .flatpickr-day.selected:hover { background: var(--accent); border-color: var(--accent); color: var(--on-accent); box-shadow: 0 0 12px -2px var(--accent-glow); }
+.flatpickr-day.selected, .flatpickr-day.selected:hover { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .flatpickr-day.prevMonthDay, .flatpickr-day.nextMonthDay, .flatpickr-day.flatpickr-disabled { color: var(--faint); }
 .flatpickr-time { border-top-color: var(--line) !important; }
 .flatpickr-time input, .flatpickr-time .flatpickr-time-separator, .flatpickr-time .flatpickr-am-pm { color: var(--ink); font-family: var(--mono); }
@@ -2219,6 +2247,8 @@ span.flatpickr-weekday { color: var(--faint); font-weight: 600; }
 .sql-editor-wrap .CodeMirror-cursor { border-left: 2px solid var(--accent); }
 .sql-editor-wrap .CodeMirror-activeline-background { background: var(--accent-faint); }
 .sql-editor-wrap .CodeMirror-selected, .sql-editor-wrap .CodeMirror-focused .CodeMirror-selected { background: var(--accent-line); }
+/* The statement that just ran, for a moment. */
+.sql-editor-wrap .cm-ran { background: var(--accent-soft); }
 /* CodeMirror's own pre.CodeMirror-line-like rule would give the placeholder the text colour. */
 .sql-editor-wrap .CodeMirror pre.CodeMirror-placeholder { color: var(--faint); }
 .sql-editor-wrap .CodeMirror-matchingbracket { color: var(--ok) !important; font-weight: 700; text-decoration: none; }
@@ -2235,7 +2265,6 @@ span.flatpickr-weekday { color: var(--faint); font-weight: 600; }
   border: 1px solid var(--line-strong);
   border-radius: var(--r);
   background: var(--glass-strong);
-  backdrop-filter: blur(20px);
   box-shadow: var(--shadow);
   font: 12.5px/1.5 var(--mono);
   max-height: 260px;

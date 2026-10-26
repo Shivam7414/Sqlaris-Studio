@@ -76,11 +76,11 @@ $vendor = array_values(array_filter(['tom-select', 'flatpickr', 'codemirror'], f
     <script src="assets/vendor/<?= $name ?>.js?v=<?= filemtime(__DIR__."/assets/vendor/{$name}.js") ?>"></script>
 <?php } ?>
     <script src="assets/diagram.js?v=<?= $version ?>"></script>
+    <script src="assets/sqltext.js?v=<?= $version ?>"></script>
     <script src="assets/app.js?v=<?= $version ?>"></script>
 </body>
 <?php } else { ?>
 <body class="login-page">
-    <div class="aurora" aria-hidden="true"></div>
     <form class="login" method="post" action="./">
         <div class="brand">
             <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>

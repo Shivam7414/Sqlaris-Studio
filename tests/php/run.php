@@ -11,8 +11,9 @@ declare(strict_types=1);
 // front), from the environment or from tests/.env. Each one gets a database
 // called sqlaris_test, made fresh for the run and dropped after it, and the
 // tests of create_database and drop_database use a second name,
-// sqlaris_test_extra, dropped before the run and after it as well. Point them
-// at a server where both names are free.
+// sqlaris_test_extra, dropped before the run and after it as well. The tests of
+// protected databases make a third, sqlaris_test_locked, which the config below
+// protects by its name. Point them at a server where all three names are free.
 
 require __DIR__.'/coverage.php';
 require __DIR__.'/../../src/lib.php';
@@ -26,6 +27,17 @@ const TEST_DATABASE = 'sqlaris_test';
 // The one other database the API tests may make. The config below lists it, since
 // create_database refuses a name the list would hide.
 const TEST_EXTRA_DATABASE = 'sqlaris_test_extra';
+
+// The database the config protects. No test but the ones of protected databases writes to it, and it only
+// exists while one of them runs. The pattern in "protect" below names it in another case and with a star,
+// so the tests also show that a pattern is a glob and ignores case.
+const TEST_LOCKED_DATABASE = 'sqlaris_test_locked';
+
+// The config's count_limit and count_seconds for the viewer under test. A table of a few thousand rows is
+// past the limit, and every other table the tests use has far fewer rows than this. A count that takes more than
+// the seconds gives up, which the tests bring about with a view that waits for each row it reads.
+const TEST_COUNT_LIMIT = 1000;
+const TEST_COUNT_SECONDS = 1;
 
 $env = dbv_env_file(__DIR__.'/../.env') + getenv();
 $failed = 0;
@@ -53,7 +65,8 @@ foreach (['pg' => ['PGSQL', 'pgsql', 5432, 'postgres'], 'my' => ['MYSQL', 'mysql
         'username' => (string) ($env["TEST_{$prefix}_USERNAME"] ?? $user),
         'password' => (string) ($env["TEST_{$prefix}_PASSWORD"] ?? ''),
         'database' => 'postgres',
-        'only' => [TEST_DATABASE, TEST_EXTRA_DATABASE],
+        'only' => [TEST_DATABASE, TEST_EXTRA_DATABASE, TEST_LOCKED_DATABASE],
+        'protect' => ['SQLARIS_*_LOCKED'],
     ];
 }
 
@@ -61,7 +74,13 @@ if ($servers !== []) {
     $username = 'tester';
     $password = bin2hex(random_bytes(12));
     $config = tempnam(sys_get_temp_dir(), 'sqlaris-config');
-    file_put_contents($config, '<?php return '.var_export(['username' => $username, 'password' => $password, 'servers' => $servers], true).";\n");
+    file_put_contents($config, '<?php return '.var_export([
+        'username' => $username,
+        'password' => $password,
+        'servers' => $servers,
+        'count_limit' => TEST_COUNT_LIMIT,
+        'count_seconds' => TEST_COUNT_SECONDS,
+    ], true).";\n");
 
     // A free port, found by asking the system for one.
     $probe = stream_socket_server('tcp://127.0.0.1:0');
@@ -79,8 +98,9 @@ if ($servers !== []) {
             $admin = $class::connect($settings, $settings['driver'] === 'pgsql' ? 'postgres' : null);
             test_database_drop($admin, $settings['driver']);
             test_database_drop($admin, $settings['driver'], TEST_EXTRA_DATABASE);
+            test_database_drop($admin, $settings['driver'], TEST_LOCKED_DATABASE);
 
-            // Both databases are dropped again in "finally", so a run that stops half way leaves nothing behind.
+            // The databases are dropped again in "finally", so a run that stops half way leaves nothing behind.
             try {
                 $admin->exec('create database '.TEST_DATABASE);
 
@@ -104,7 +124,7 @@ if ($servers !== []) {
                 };
                 TestClient::$succeeded = [];
                 api_tests("[{$settings['driver']}]", $settings['driver'], $client, $key.'/'.TEST_DATABASE, $pdo,
-                    fn (string $database): PDO => $class::connect($settings, $database), $signIn);
+                    fn (string $database): PDO => $class::connect($settings, $database), $signIn, $settings);
                 // Added last, so it runs after every test above has had its say.
                 route_test("[{$settings['driver']}]");
                 $failed += run_tests();
@@ -112,6 +132,7 @@ if ($servers !== []) {
                 $pdo = null;
                 test_database_drop($admin, $settings['driver']);
                 test_database_drop($admin, $settings['driver'], TEST_EXTRA_DATABASE);
+                test_database_drop($admin, $settings['driver'], TEST_LOCKED_DATABASE);
             }
         }
     } finally {

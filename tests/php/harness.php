@@ -165,7 +165,7 @@ final class TestClient
 
     public function __construct(public readonly TestServer $server) {}
 
-    /** @return array{status: int, body: string} */
+    /** @return array{status: int, body: string, headers: string} the headers as the server sent them, for a test that reads one */
     public function request(string $method, string $path, string $body = '', array $headers = []): array
     {
         $headers += ['Host' => "127.0.0.1:{$this->server->port}"];
@@ -196,7 +196,7 @@ final class TestClient
             $this->cookie = $m[1];
         }
 
-        return ['status' => $status, 'body' => substr($raw, $split)];
+        return ['status' => $status, 'body' => substr($raw, $split), 'headers' => substr($raw, 0, $split)];
     }
 
     /** Signs in through the form on the page, token and all. Returns the page that comes back. */
@@ -212,7 +212,7 @@ final class TestClient
     /**
      * One call to api.php, the way the page makes it.
      *
-     * @return array{status: int, json: mixed, body: string}
+     * @return array{status: int, json: mixed, body: string, headers: string}
      */
     public function api(string $action, array $payload = [], array $headers = []): array
     {

@@ -290,33 +290,86 @@ function dbv_action_structure(DbvDriver $d, array $t): array
     return ['table' => dbv_public_meta($t)] + $d->structure($t);
 }
 
+/** The page's mark for a query it may want to stop: letters and digits only, since it goes into the SQL as a comment. */
+function dbv_tag(array $req): string
+{
+    $tag = (string) ($req['tag'] ?? '');
+
+    return preg_match('/^[a-z0-9]{8,32}$/', $tag) ? $tag : '';
+}
+
+/**
+ * How many rows match, and whether that is an exact count. Counting reads
+ * every row, which on a big table takes seconds, so an unsearched table past
+ * count_limit gives the catalog's estimate instead. A count that runs past
+ * count_seconds gives up: the estimate without a search, null with one.
+ *
+ * @return array{0: ?int, 1: bool}
+ */
+function dbv_total(DbvDriver $d, array $t, string $where, array $params, string $tag): array
+{
+    $real = in_array($t['kind'], ['table', 'partitioned table'], true);
+    $estimate = $real && $where === '' ? $d->estimate($t) : null;
+
+    if ($estimate !== null && $estimate >= (int) dbv_config('count_limit')) {
+        return [$estimate, false];
+    }
+
+    $d->timeLimit((int) dbv_config('count_seconds'));
+
+    try {
+        $count = $d->pdo->prepare('select '.DbvDriver::tagComment($tag).'count(*) from '.$d->from($t).$where);
+        $count->execute($params);
+
+        return [(int) $count->fetchColumn(), true];
+    } catch (PDOException) {
+        // The rows came back with the same WHERE, so this is the time limit or a stop.
+        return [$estimate, false];
+    } finally {
+        $d->timeLimit(null);
+    }
+}
+
 function dbv_action_rows(DbvDriver $d, array $t, array $req): array
 {
     $started = hrtime(true);
     $perPage = max(1, min(1000, (int) ($req['perPage'] ?? 50)));
     $page = max(1, (int) ($req['page'] ?? 1));
+    $tag = dbv_tag($req);
     [$where, $params] = dbv_where($d, $t, $req);
     $near = dbv_near($d, $t, $req['near'] ?? null);
 
-    $count = $d->pdo->prepare('select count(*) from '.$d->from($t).$where);
-    $count->execute($params);
-
+    // The rows first: a page of them comes back fast even when counting them all would not.
     // With a nearest-rows search, each row's distance comes last, after its
     // columns. The ORDER BY names it, so it is worked out once per row.
-    $rows = $d->pdo->prepare('select '.dbv_text_columns($d, $t).($near === null ? '' : ", {$near[0]} as dbv_distance")
+    $rows = $d->pdo->prepare('select '.DbvDriver::tagComment($tag).dbv_text_columns($d, $t).($near === null ? '' : ", {$near[0]} as dbv_distance")
         .' from '.$d->from($t).$where.dbv_order($d, $t, $req['sort'] ?? null, $near === null ? null : 'dbv_distance')
         ." limit {$perPage} offset ".(($page - 1) * $perPage));
     $rows->execute($near === null ? $params : [...$near[1], ...$params]);
     $rows = $rows->fetchAll(PDO::FETCH_NUM);
+    [$total, $exact] = dbv_total($d, $t, $where, $params, $tag);
 
     return [
         'table' => dbv_public_meta($t),
         'rows' => $near === null ? $rows : array_map(fn ($row) => array_slice($row, 0, -1), $rows),
-        'total' => (int) $count->fetchColumn(),
+        'total' => $total,
+        'exact' => $exact,
         'page' => $page,
         'perPage' => $perPage,
         'ms' => (int) round((hrtime(true) - $started) / 1e6),
     ] + ($near === null ? [] : ['distances' => array_column($rows, count($t['columns']))]);
+}
+
+/** Stops the page's own query that carries this tag, such as a slow search it no longer needs. */
+function dbv_action_cancel(DbvDriver $d, array $req): array
+{
+    $tag = dbv_tag($req);
+
+    if ($tag === '') {
+        throw new DbvError('The query to stop is missing. Refresh and try again.');
+    }
+
+    return ['stopped' => $d->cancelTagged($tag)];
 }
 
 /** How many rows in other tables point at this one, per foreign key. */
@@ -570,6 +623,287 @@ function dbv_action_export(DbvDriver $d, array $t, array $req): never
     }
 
     exit;
+}
+
+/**
+ * The whole database, or the tables picked, as one .sql file that makes them
+ * again in an empty database: each table, then its rows as INSERTs a hundred
+ * at a time, then the keys between tables, indexes and views. Every table is
+ * read in one snapshot, so the rows agree with each other.
+ */
+function dbv_action_backup(DbvDriver $d, string $db, array $req): never
+{
+    $picked = $req['tables'] ?? null;
+    $all = array_values(array_filter($d->tables()['tables'], fn ($t) => $t['kind'] !== 'foreign table'));
+    $refs = is_array($picked) ? $picked : array_map(fn ($t) => ['schema' => $t['schema'], 'name' => $t['name']], $all);
+
+    if ($refs === []) {
+        throw new DbvError('Pick at least one table.');
+    }
+
+    $chosen = array_map(fn ($ref) => dbv_table($d, $ref), $refs);
+    // A name goes into a comment line, and a line break of any kind in it would end the comment.
+    $plain = fn (string $text): string => preg_replace('/[\x00-\x1f\x7f\x{2028}\x{2029}]/u', ' ', $text);
+    $tables = array_values(array_filter($chosen, fn ($t) => $t['kind'] === 'table'));
+    $views = array_values(array_filter($chosen, fn ($t) => in_array($t['kind'], ['view', 'materialized view'], true)));
+    $rows = ($req['rows'] ?? true) !== false;
+
+    @set_time_limit(0);
+    $d->timeLimit(0);
+    $d->snapshot();
+    $schema = $d->backupSchema($tables, $views);
+    $leftOut = $schema['left_out'];
+
+    foreach ($chosen as $t) {
+        if ($t['kind'] === 'partitioned table') {
+            $leftOut[] = "the partitioned table {$t['name']} itself (its partitions come as plain tables)";
+        }
+    }
+
+    header('Content-Type: application/sql; charset=utf-8');
+    echo '-- Sqlaris Studio backup of '.$plain($db).', '.gmdate('Y-m-d H:i').' UTC. '
+        .count($tables).' tables, '.count($views).' views'.($rows ? ', with their rows' : ', without rows').".\n"
+        ."-- Restore it into an empty database: Operations, then Restore from a .sql file.\n"
+        .'-- Not in it: '.$plain(implode('; ', $leftOut)).".\n\n";
+    echo implode("\n", $schema['head'])."\n";
+
+    foreach ($tables as $t) {
+        echo "\n".$schema['tables']["{$t['schema']}.{$t['name']}"]."\n";
+
+        if (! $rows) {
+            continue;
+        }
+
+        $columns = array_values(array_filter($t['columns'], fn ($c) => ! $c['generated']));
+        $names = array_column($columns, 'name');
+        $select = 'select '.implode(', ', array_map(fn ($c) => $d->dumpValue($d->quote($c['name']), $c), $columns)).' from '.$d->tableName($t);
+        $into = $d->dumpInsert($t, $names);
+        $batch = [];
+
+        foreach ($d->stream($select) as $row) {
+            $batch[] = '('.implode(', ', array_map([$d, 'dumpLiteral'], $row, $columns)).')';
+
+            if (count($batch) === 100) {
+                echo $into."\n".implode(",\n", $batch).";\n";
+                $batch = [];
+            }
+        }
+
+        if ($batch !== []) {
+            echo $into."\n".implode(",\n", $batch).";\n";
+        }
+    }
+
+    echo "\n".implode("\n", $schema['tail'])."\n";
+    exit;
+}
+
+/**
+ * Runs a backup, or any script of statements the page split, in one
+ * transaction. If one fails, nothing is kept and the error names it. MySQL
+ * keeps a table it makes even so, since CREATE TABLE commits by itself.
+ */
+function dbv_action_restore(DbvDriver $d, array $req): array
+{
+    $statements = array_values(array_filter(array_map('trim', array_map('strval', (array) ($req['statements'] ?? []))), fn ($s) => $s !== ''));
+
+    if ($statements === []) {
+        throw new DbvError('The file has no SQL in it.');
+    }
+
+    @set_time_limit(0);
+    $d->timeLimit(0);
+    $pdo = $d->pdo;
+    $pdo->setAttribute(PDO::ATTR_EMULATE_PREPARES, true);
+    $started = hrtime(true);
+    $pdo->beginTransaction();
+
+    foreach ($statements as $i => $sql) {
+        try {
+            $pdo->exec($sql);
+        } catch (PDOException $e) {
+            $kept = ! $d->inTransaction();
+
+            if (! $kept) {
+                $pdo->rollBack();
+            }
+
+            $first = mb_strimwidth(preg_replace('/\s+/', ' ', $sql), 0, 120, '...');
+            throw new DbvError('Statement '.($i + 1)." of ".count($statements)." did not run: {$first}\n".DbvDriver::message($e)
+                .($kept ? "\nMySQL keeps each table it makes as it goes, so what came before this statement may be there. Restore into an empty database." : "\nNothing was kept."), 0, $e);
+        }
+    }
+
+    if ($d->inTransaction()) {
+        $pdo->commit();
+    }
+
+    return ['statements' => count($statements), 'ms' => (int) round((hrtime(true) - $started) / 1e6)];
+}
+
+/**
+ * How the structure of the open database differs from another one on the
+ * list, and the SQL that would make the open one like the other: tables,
+ * columns, indexes, keys and views. Nothing runs. What could throw data away
+ * (dropping a table, column or view the other one does not have, or a new
+ * column type that can cut values) comes out as commented lines, so running
+ * the script as it is never loses anything.
+ */
+function dbv_action_compare(DbvDriver $d, string $db, array $req): array
+{
+    [$server, $otherName] = dbv_find((string) ($req['other'] ?? ''));
+
+    if ($server['class'] !== $d::class) {
+        throw new DbvError('Only two databases of the same system can be compared: PostgreSQL with PostgreSQL, MySQL with MySQL.');
+    }
+
+    $o = dbv_open((string) $req['other']);
+    // In MySQL the schema is the database, so tables match by name alone.
+    $key = fn (DbvDriver $x, array $t): string => $t['schema'] === $x->defaultSchema() ? $t['name'] : "{$t['schema']}.{$t['name']}";
+    $list = function (DbvDriver $x) use ($key): array {
+        $out = [];
+
+        foreach ($x->tables()['tables'] as $t) {
+            if (in_array($t['kind'], ['table', 'view', 'materialized view'], true)) {
+                $out[$key($x, $t)] = $t;
+            }
+        }
+
+        return $out;
+    };
+    $want = $list($o);
+    $have = $list($d);
+    $sql = [];
+    $drops = [];
+    $changes = [];
+    $isView = fn (array $t): bool => $t['kind'] !== 'table';
+    $commented = fn (string $s): string => '-- '.str_replace("\n", "\n-- ", $s);
+    // A view as a backup writes it, without the database's own name in it, so the same view reads the same in both.
+    $viewSql = function (DbvDriver $x, array $v): string {
+        $made = array_values(array_filter($x->backupSchema([], [$v])['tail'], fn ($s) => ! str_starts_with($s, 'set ')));
+
+        return $made[0] ?? '';
+    };
+    $flat = fn (string $sql): string => preg_replace('/\s+/', ' ', $sql);
+
+    // Tables and views the open database lacks: made the way a backup makes them.
+    $missing = array_map(fn ($k) => dbv_table($o, $want[$k]), array_keys(array_diff_key($want, $have)));
+    $newTables = array_values(array_filter($missing, fn ($t) => ! $isView($t)));
+    $newViews = array_values(array_filter($missing, $isView));
+
+    if ($missing !== []) {
+        $made = $o->backupSchema($newTables, $newViews);
+        // The open database may have a type or sequence of that name already, which is then left as it is.
+        $first = array_values(array_map(fn ($s) => match (true) {
+            str_starts_with($s, 'create type ') => 'do $$ begin '.$s.' exception when duplicate_object then null; end $$;',
+            str_starts_with($s, 'create sequence ') => 'create sequence if not exists '.substr($s, strlen('create sequence ')),
+            default => $s,
+        }, array_filter($made['head'], fn ($s) => ! str_starts_with($s, 'set '))));
+        array_push($sql, ...$first, ...array_values($made['tables']), ...array_values(array_filter($made['tail'], fn ($s) => ! str_starts_with($s, 'set '))));
+    }
+
+    foreach (array_keys(array_diff_key($have, $want)) as $k) {
+        $t = $have[$k];
+        $drops[] = '-- drop '.($isView($t) ? 'view ' : 'table ').$d->tableName($t).';';
+    }
+
+    $same = 0;
+
+    foreach (array_intersect_key($want, $have) as $tableKey => $ref) {
+        $source = dbv_table($o, $ref);
+        $target = dbv_table($d, $have[$tableKey]);
+        $items = [];
+
+        if ($isView($source) || $isView($target)) {
+            if ($isView($source) !== $isView($target)) {
+                $items[] = ['what' => $source['name'], 'change' => $isView($source) ? 'is a view there, a table here' : 'is a table there, a view here'];
+            } elseif ($flat($theirs = $viewSql($o, $source)) !== $flat($viewSql($d, $target))) {
+                $items[] = ['what' => 'its query', 'change' => 'differs'];
+
+                if ($source['kind'] === 'materialized view') {
+                    // There is no "or replace" for these: it is dropped and made again, rows and all.
+                    $drops[] = '-- drop materialized view '.$d->tableName($target).';';
+                    $drops[] = $commented($theirs);
+                } else {
+                    // MySQL writes CREATE ALGORITHM=... VIEW, PostgreSQL create view; both take OR REPLACE straight after CREATE.
+                    $sql[] = preg_replace('/^create /i', 'create or replace ', $theirs);
+                }
+            }
+        } else {
+            foreach ($source['columns'] as $name => $c) {
+                $spec = ['name' => $name, 'type' => $c['type'], 'nullable' => $c['nullable'], 'default' => $c['default_sql'], 'comment' => $c['comment']];
+                $mine = $target['columns'][$name] ?? null;
+
+                if ($mine === null) {
+                    $items[] = ['what' => "column {$name}", 'change' => 'missing here'];
+                    array_push($sql, ...array_map(fn ($s) => rtrim($s, ';').';', $d->columnSql($target, null, $spec)));
+                } elseif ($c['generated'] || $mine['generated']) {
+                    if ($c['type'] !== $mine['type'] || $c['default_sql'] !== $mine['default_sql']) {
+                        $items[] = ['what' => "column {$name}", 'change' => 'is worked out differently. Change it by hand.'];
+                    }
+                } else {
+                    $alter = $d->columnSql($target, $mine, $spec);
+
+                    if ($alter !== []) {
+                        $was = fn (array $x): string => $x['type'].($x['nullable'] ? '' : ' not null').($x['default_sql'] === null ? '' : ' default '.$x['default_sql']);
+                        $items[] = ['what' => "column {$name}", 'change' => 'differs', 'there' => $was($c), 'here' => $was($mine)];
+                        $statements = array_map(fn ($s) => rtrim($s, ';').';', $alter);
+
+                        // A new type can cut or round what the column holds, so that waits to be chosen.
+                        if ($c['type'] !== $mine['type']) {
+                            $drops[] = "-- {$target['name']}.{$name} becomes {$c['type']} instead of {$mine['type']}, which can cut or round its values:";
+                            array_push($drops, ...array_map($commented, $statements));
+                        } else {
+                            array_push($sql, ...$statements);
+                        }
+                    }
+                }
+            }
+
+            foreach (array_diff_key($target['columns'], $source['columns']) as $name => $c) {
+                $items[] = ['what' => "column {$name}", 'change' => 'only here'];
+                $drops[] = '-- alter table '.$d->tableName($target).' drop column '.$d->quote($name).';';
+            }
+
+            $wantKeys = $o->keys($source);
+            $haveKeys = $d->keys($target);
+
+            foreach ($wantKeys as $name => $k) {
+                $mine = $haveKeys[$name] ?? null;
+
+                if ($mine === null) {
+                    $items[] = ['what' => "{$k['kind']} {$name}", 'change' => 'missing here'];
+                    $sql[] = $d->keySql($target, $name, $k, true);
+                } elseif ($mine['def'] !== $k['def'] || $mine['kind'] !== $k['kind']) {
+                    $items[] = ['what' => "{$k['kind']} {$name}", 'change' => 'differs', 'there' => $k['def'], 'here' => $mine['def']];
+                    $sql[] = $d->keySql($target, $name, $mine, false);
+                    $sql[] = $d->keySql($target, $name, $k, true);
+                }
+            }
+
+            foreach (array_diff_key($haveKeys, $wantKeys) as $name => $k) {
+                $items[] = ['what' => "{$k['kind']} {$name}", 'change' => 'only here'];
+                $sql[] = $d->keySql($target, $name, $k, false);
+            }
+        }
+
+        if ($items === []) {
+            $same++;
+        } else {
+            $changes[] = ['table' => $tableKey, 'items' => $items];
+        }
+    }
+
+    return [
+        'other' => $otherName,
+        'here' => $db,
+        'missing' => array_keys(array_diff_key($want, $have)),
+        'extra' => array_keys(array_diff_key($have, $want)),
+        'changed' => $changes,
+        'same' => $same,
+        'sql' => $sql,
+        'drops' => $drops,
+    ];
 }
 
 /** Different changes for different rows, in one transaction. Used by a paste that covers many cells. */

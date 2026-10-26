@@ -25,6 +25,8 @@ const DBV_DEFAULTS = [
     'sql_row_limit' => 2000,
     'export_row_limit' => 100000,
     'import_row_limit' => 5000,
+    'count_limit' => 1000000,
+    'count_seconds' => 3,
     'label_columns' => ['name', 'full_name', 'display_name', 'title', 'label', 'username', 'email', 'code'],
     'audit_columns' => ['created_at', 'updated_at', 'deleted_at', 'created_by', 'updated_by'],
     'edit_warning' => null,
@@ -244,6 +246,7 @@ function dbv_servers(): array
             'only' => [],
             'hide' => [],
             'databases' => [],
+            'protect' => [],
             'color' => null,
         ];
     }
@@ -272,6 +275,68 @@ function dbv_matches(string $name, array $globs): bool
 function dbv_listed(array $server, string $name): bool
 {
     return ($server['only'] === [] || dbv_matches($name, (array) $server['only'])) && ! dbv_matches($name, (array) $server['hide']);
+}
+
+/**
+ * Who protects this database: "config" when a pattern in the server's
+ * "protect" matches its name, "you" when you protected it in the page (the
+ * layout's "protected"), else null. A protected database refuses changes
+ * until it is unlocked.
+ */
+function dbv_protection(array $server, string $name, array $layout): ?string
+{
+    if (dbv_matches($name, (array) ($server['protect'] ?? []))) {
+        return 'config';
+    }
+
+    return in_array($server['key'].'/'.$name, (array) ($layout['protected'] ?? []), true) ? 'you' : null;
+}
+
+/** How long one unlock of a protected database lasts. */
+const DBV_UNLOCK_SECONDS = 15 * 60;
+
+/**
+ * The actions that change a database, which a protected one refuses until it
+ * is unlocked. The SQL tab counts only when it asks for writes.
+ */
+function dbv_is_write(string $action, array $req): bool
+{
+    return in_array($action, [
+        'update', 'insert', 'delete', 'update_each', 'import', 'truncate', 'maintain', 'drop_table',
+        'rename_table', 'copy_table', 'save_column', 'drop_column', 'stop', 'drop_database', 'restore',
+    ], true) || ($action === 'sql' && ($req['write'] ?? false) === true && ($req['explain'] ?? false) !== true)
+        // On PostgreSQL a copy closes every session of the database it copies.
+        || ($action === 'create_database' && ($req['copy'] ?? false) === true);
+}
+
+/** Refuses a change to a protected database that this session has not unlocked. */
+function dbv_check_protected(string $id, array $unlocked): void
+{
+    [$server, $name] = dbv_find($id);
+
+    if (dbv_protection($server, $name, dbv_layout()) !== null && ($unlocked[$id] ?? 0) <= time()) {
+        dbv_send(['error' => "{$name} is protected. Unlock it to make changes.", 'protected' => true, 'db' => $id], 423);
+    }
+}
+
+/**
+ * A protection you set in the page comes off only while that database is
+ * unlocked, so taking it off needs the name typed as much as a change does.
+ */
+function dbv_check_unprotect(array $layout, array $unlocked): void
+{
+    $kept = dbv_clean_layout($layout)['protected'];
+
+    foreach (array_diff(dbv_layout()['protected'], $kept) as $id) {
+        try {
+            dbv_find($id);
+        } catch (DbvError) {
+            // Not on the list any more, so there is nothing left to guard.
+            continue;
+        }
+
+        dbv_check_protected($id, $unlocked);
+    }
 }
 
 /**
@@ -343,6 +408,7 @@ function dbv_database_groups(): array
                 'name' => $name,
                 'note' => $look['note'] ?? null,
                 'color' => $look['color'] ?? $server['color'],
+                'protected' => dbv_matches($name, (array) $server['protect']) ? 'config' : null,
                 'driver' => $server['class']::DRIVER,
                 'system' => $server['class']::LABEL,
                 'where' => $where,
@@ -367,8 +433,8 @@ function dbv_layout(): array
  * Keeps only the shape the page reads, so a file edited by hand or a bad
  * request can never break the list. "groups" are your own groups with the
  * database ids in each, "order" is the order of every group by its key,
- * "hidden" the databases kept out of the way, and "folded" the groups you
- * opened or closed.
+ * "hidden" the databases kept out of the way, "protected" the ones you
+ * protected, and "folded" the groups you opened or closed.
  */
 function dbv_clean_layout(array $layout): array
 {
@@ -394,7 +460,13 @@ function dbv_clean_layout(array $layout): array
     }
 
     // An object, so the page gets {} and not [] when nothing is folded.
-    return ['groups' => $groups, 'order' => $ids($layout['order'] ?? []), 'hidden' => $ids($layout['hidden'] ?? []), 'folded' => (object) $folded];
+    return [
+        'groups' => $groups,
+        'order' => $ids($layout['order'] ?? []),
+        'hidden' => $ids($layout['hidden'] ?? []),
+        'protected' => $ids($layout['protected'] ?? []),
+        'folded' => (object) $folded,
+    ];
 }
 
 function dbv_save_layout(array $layout): array
@@ -588,7 +660,22 @@ function dbv_settings(): array
     return [
         'audit_columns' => array_values((array) dbv_config('audit_columns')),
         'edit_warning' => dbv_config('edit_warning'),
+        // The most one request may carry, so the page can say a restore is too big before it sends it.
+        'upload_limit' => dbv_ini_bytes((string) ini_get('post_max_size')),
     ];
+}
+
+/** A size from php.ini, such as 8M, in bytes. 0 means no limit. */
+function dbv_ini_bytes(string $size): int
+{
+    $n = (int) $size;
+
+    return match (strtolower(substr(trim($size), -1))) {
+        'g' => $n * 1024 ** 3,
+        'm' => $n * 1024 ** 2,
+        'k' => $n * 1024,
+        default => $n,
+    };
 }
 
 /**

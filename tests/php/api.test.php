@@ -58,12 +58,14 @@ const FIXTURES = [
  * The tests for one server. $pdo is a connection of the tests' own to the
  * test database, $db the id the page uses for it. $connect opens another
  * connection of the tests' own, to any database on the server, and $signIn
- * gives a second browser that is signed in.
+ * gives a second browser that is signed in. $settings is this server's entry
+ * in the config, for db-child.php, which the tests start as a process of its
+ * own when something has to go on while the viewer answers.
  *
  * @param  callable(string): PDO  $connect
  * @param  callable(): TestClient  $signIn
  */
-function api_tests(string $tag, string $driver, TestClient $c, string $db, PDO $pdo, callable $connect, callable $signIn): void
+function api_tests(string $tag, string $driver, TestClient $c, string $db, PDO $pdo, callable $connect, callable $signIn, array $settings): void
 {
     $q = $driver === 'pgsql' ? fn ($n) => '"'.str_replace('"', '""', $n).'"' : fn ($n) => '`'.str_replace('`', '``', $n).'`';
     $count = fn (string $table = 'items') => (int) $pdo->query('select count(*) from '.$q($table))->fetchColumn();
@@ -1311,6 +1313,1763 @@ function api_tests(string $tag, string $driver, TestClient $c, string $db, PDO $
         same(401, $other->api('rows', ['db' => $db, 'table' => ['name' => 'items']])['status'], 'and cannot read a table either');
         $c->ok('databases');
         $c->ok('rows', ['db' => $db, 'table' => ['name' => 'items']]);
+    });
+
+    // Protected databases. A database is protected by a pattern in config.php (sqlaris_test_locked, made by the test
+    // that needs it) or by the page, through the layout (the other tests). Every test turns the protection on for
+    // itself, works on tables of its own, and in "finally" takes the protection off and locks again. The clean-up
+    // asks for the lock with api() and not ok(), so an action that is not there yet cannot hide the real failure.
+
+    $serverKey = explode('/', $db, 2)[0];
+    $extraId = $serverKey.'/'.TEST_EXTRA_DATABASE;
+    $lockedId = $serverKey.'/'.TEST_LOCKED_DATABASE;
+    $protectInPage = fn (string ...$ids) => $c->ok('layout', ['layout' => ['protected' => $ids]]);
+    // Takes the page's protection off every database. The layout refuses that for a database that is locked, so each is
+    // unlocked first, with its name typed, and locked again after. The calls that can fail are api() ones: this is clean-up.
+    $unprotect = function () use ($c): void {
+        $ids = $c->api('databases')['json']['layout']['protected'] ?? [];
+
+        foreach ($ids as $id) {
+            $c->api('unlock', ['db' => $id, 'name' => substr($id, (int) strpos($id, '/') + 1)]);
+        }
+
+        $c->ok('layout', ['layout' => []]);
+
+        foreach ($ids as $id) {
+            $c->api('lock', ['db' => $id]);
+        }
+    };
+    $lockAgain = function (string ...$ids) use ($c): void {
+        foreach ($ids as $id) {
+            $c->api('lock', ['db' => $id]);
+        }
+    };
+    // Unlocks with the name typed back. Fails unless the answer says when it ends, about 15 minutes from now.
+    $unlock = function (string $id, string $name, ?TestClient $as = null) use ($c): int {
+        $started = time();
+        $r = ($as ?? $c)->ok('unlock', ['db' => $id, 'name' => $name]);
+
+        check(isset($r['until']) && is_int($r['until']), 'unlock should answer with "until", the end of the unlock in unix seconds: '.json_encode($r));
+        check($r['until'] >= $started + 14 * 60 && $r['until'] <= time() + 16 * 60, 'unlock should last about 15 minutes, but it ends '.($r['until'] - $started).' seconds from now');
+
+        return $r['until'];
+    };
+    // An unlock that must be refused. A call to an action that does not exist is refused too, so that is not allowed to count.
+    $unlockRefused = function (array $payload, string $part = '') use ($c): array {
+        $r = $c->api('unlock', $payload);
+        $error = (string) ($r['json']['error'] ?? '');
+
+        check($r['status'] >= 400, 'unlock should have been refused for '.json_encode($payload).', but answered '.$r['status'].': '.substr($r['body'], 0, 200));
+        check($error !== 'Unknown action.', 'there is no unlock action');
+        check($part === '' || str_contains($error, $part), "unlock was refused, but the message does not mention \"{$part}\": {$error}");
+
+        return $r;
+    };
+    // A change that must be refused as protected: 423, the flag the page reads, and the name of the database. Returns
+    // what is wrong with the answer, or null, so a test can run many changes and list every one that got through.
+    $lockedAnswer = function (string $action, array $payload, ?TestClient $as = null, string $name = TEST_DATABASE) use ($c): ?string {
+        $r = ($as ?? $c)->api($action, $payload);
+        $error = (string) ($r['json']['error'] ?? '');
+
+        if ($r['status'] !== 423) {
+            return "{$action} answered {$r['status']}, not 423: ".substr($r['body'], 0, 160);
+        }
+
+        if (($r['json']['protected'] ?? null) !== true) {
+            return "{$action} was refused, but the answer does not carry \"protected\": true: ".substr($r['body'], 0, 160);
+        }
+
+        if (! str_contains($error, 'is protected') || ! str_contains($error, $name)) {
+            return "{$action} was refused, but the message does not say that {$name} is protected: {$error}";
+        }
+
+        return null;
+    };
+    $refusedLocked = function (string $action, array $payload, ?TestClient $as = null, string $name = TEST_DATABASE) use ($lockedAnswer): void {
+        $problem = $lockedAnswer($action, $payload, $as, $name);
+        check($problem === null, (string) $problem);
+    };
+
+    // Two small tables of the tests' own, in any of the test databases, and what is done to them.
+    $probeNames = ['probe_locked', 'probe_locked_two', 'probe_locked_copy', 'probe_locked_renamed'];
+    $dropProbes = function (PDO $on) use ($probeNames): void {
+        foreach ($probeNames as $name) {
+            $on->exec("drop table if exists {$name}");
+        }
+    };
+    $makeProbes = function (PDO $on) use ($dropProbes): void {
+        $dropProbes($on);
+        $on->exec('create table probe_locked (id integer primary key, label varchar(50), qty integer not null default 0)');
+        $on->exec("insert into probe_locked values (1, 'one', 1), (2, 'two', 2), (3, 'three', 3)");
+        $on->exec('create table probe_locked_two (id integer primary key)');
+        $on->exec('insert into probe_locked_two values (1)');
+    };
+    $qtyIn = fn (PDO $on): string => (string) $on->query('select qty from probe_locked where id = 1')->fetchColumn();
+    $probeIds = fn (): array => array_map('intval', $pdo->query('select id from probe_locked order by id')->fetchAll(PDO::FETCH_COLUMN));
+    $bump = fn (string $id, string $qty): array => ['db' => $id, 'table' => ['name' => 'probe_locked'], 'keys' => [['id' => '1']], 'changes' => ['qty' => $qty]];
+    // One valid change of each kind that api.php has, in an order in which all of them can be made one after the other.
+    $changes = function (string $id, int $session, string $op): array {
+        $one = ['db' => $id, 'table' => ['name' => 'probe_locked']];
+        $two = ['db' => $id, 'table' => ['name' => 'probe_locked_two']];
+
+        return [
+            'update' => $one + ['keys' => [['id' => '1']], 'changes' => ['qty' => '77']],
+            'insert' => $one + ['values' => ['id' => '4', 'label' => 'four']],
+            'delete' => $one + ['keys' => [['id' => '2']]],
+            'update_each' => $one + ['items' => [['key' => ['id' => '3'], 'changes' => ['qty' => '88']]]],
+            'import' => $one + ['columns' => ['id', 'label'], 'rows' => [['5', 'five']]],
+            'sql' => ['db' => $id, 'sql' => "update probe_locked set label = 'by sql' where id = 1", 'write' => true],
+            'maintain' => $one + ['op' => $op],
+            'copy_table' => $one + ['to' => 'probe_locked_copy'],
+            'save_column' => $one + ['run' => true, 'spec' => ['name' => 'extra', 'type' => 'varchar(20)', 'nullable' => true]],
+            'drop_column' => $one + ['column' => 'label', 'confirm' => 'label'],
+            'truncate' => $one + ['confirm' => 'probe_locked'],
+            'rename_table' => $two + ['to' => 'probe_locked_renamed'],
+            'drop_table' => $one + ['confirm' => 'probe_locked'],
+            'stop' => ['db' => $id, 'id' => $session, 'kill' => true],
+        ];
+    };
+    $opOf = fn (string $id): string => $c->ok('tables', ['db' => $id])['info']['maintenance'][1]['op'];
+    // Every table of the test database with its columns and rows, to show that nothing in it changed.
+    $state = function () use ($pdo, $q, $tablesOf, $columnsOf): array {
+        $state = [];
+
+        foreach ($tablesOf($pdo, true) as $table) {
+            $state[$table] = [$columnsOf($table), $pdo->query('select * from '.$q($table).' order by 1')->fetchAll(PDO::FETCH_NUM)];
+        }
+
+        return $state;
+    };
+    // Other databases of the tests' own, made and dropped through a connection of the tests' own.
+    $dropDatabase = function (string $name) use ($connect, $driver): void {
+        $admin = $connect(TEST_DATABASE);
+
+        if ($driver === 'pgsql') {
+            // Whoever is still in it is sent away first, as the run does for its own databases.
+            $admin->exec('select pg_terminate_backend(pid) from pg_stat_activity where datname = '.$admin->quote($name).' and pid <> pg_backend_pid()');
+        }
+
+        $admin->exec('drop database if exists '.$name);
+    };
+    $makeDatabase = function (string $name) use ($connect, $dropDatabase): PDO {
+        $dropDatabase($name);
+        $connect(TEST_DATABASE)->exec('create database '.$name);
+
+        return $connect($name);
+    };
+    $listedItems = fn (array $answer): array => array_merge(...array_column($answer['groups'], 'items'));
+
+    test("{$tag} the layout keeps the databases marked as protected, cleaned the way the hidden ones are", function () use ($c, $db, $unlock, $unprotect, $lockAgain) {
+        try {
+            $saved = $c->ok('layout', ['layout' => ['protected' => [$db, $db, 42, '', ['nested'], str_repeat('x', 301), 'other/db'], 'hidden' => ['other/db']]])['layout'];
+            $onDisk = json_decode((string) file_get_contents($c->server->layout), true);
+            $listed = $c->ok('databases')['layout'];
+
+            foreach (['answer' => $saved, 'file' => $onDisk, 'next list' => $listed] as $where => $layout) {
+                same([$db, 'other/db'], $layout['protected'] ?? 'missing', "the protected databases in the {$where}, once each and without what is not an id");
+                same(['other/db'], $layout['hidden'], "the hidden databases in the {$where} are a list of their own");
+            }
+
+            // With none marked, the key is still there, as a list. Taking the mark off needs the database unlocked.
+            $unlock($db, TEST_DATABASE);
+            $saved = $c->ok('layout', ['layout' => []]);
+            $onDisk = json_decode((string) file_get_contents($c->server->layout), true);
+            $listed = $c->api('databases');
+
+            same([], $saved['layout']['protected'] ?? 'missing', 'the answer');
+            same([], $onDisk['protected'] ?? 'missing', 'the file');
+            same([], $listed['json']['layout']['protected'] ?? 'missing', 'the next list');
+            check(str_contains($listed['body'], '"protected":[]'), 'the page gets [] and not {} for it: '.substr($listed['body'], 0, 300));
+        } finally {
+            $unprotect();
+            $lockAgain($db);
+        }
+    });
+
+    test("{$tag} the list of databases says what this session has unlocked, and leaves protection by the page to the layout", function () use ($c, $db, $listedItems, $protectInPage, $unprotect, $unlock, $lockAgain) {
+        $first = $c->api('databases');
+        same(200, $first['status']);
+        check(array_key_exists('unlocked', $first['json']), 'the list has no "unlocked": '.substr($first['body'], 0, 200));
+        check(preg_match('/"unlocked":\{\}/', $first['body']) === 1, 'with nothing unlocked the page gets {} and not []: '.substr($first['body'], 0, 200));
+
+        foreach ($listedItems($first['json']) as $item) {
+            check(array_key_exists('protected', $item), "{$item['name']} has no \"protected\" in the list");
+            same(null, $item['protected'], "the config does not protect {$item['name']}");
+        }
+
+        try {
+            $protectInPage($db);
+            $r = $c->ok('databases');
+            $mine = array_values(array_filter($listedItems($r), fn ($item) => $item['id'] === $db))[0];
+
+            same(null, $mine['protected'], 'what the page marked is read from the layout, so the item says null');
+            same([$db], $r['layout']['protected']);
+            same([], $r['unlocked'], 'protected is not unlocked');
+
+            $unlock($db, TEST_DATABASE);
+            $unlocked = $c->ok('databases')['unlocked'];
+            same([$db], array_keys($unlocked), 'the database the session unlocked');
+            check(is_int($unlocked[$db]) && $unlocked[$db] >= 14 * 60 && $unlocked[$db] <= 16 * 60, "it says the seconds left, about 15 minutes: {$unlocked[$db]}");
+
+            $c->ok('lock', ['db' => $db]);
+            $after = $c->api('databases');
+            check(preg_match('/"unlocked":\{\}/', $after['body']) === 1, 'locked again, the page gets {}: '.substr($after['body'], 0, 200));
+        } finally {
+            $unprotect();
+            $lockAgain($db);
+        }
+    });
+
+    test("{$tag} a protected database refuses every change while it is locked, and nothing in it changes", function () use ($db, $pdo, $connect, $sessionId, $sessions, $protectInPage, $unprotect, $lockAgain, $lockedAnswer, $makeProbes, $dropProbes, $changes, $opOf, $state) {
+        $makeProbes($pdo);
+        $other = $connect(TEST_DATABASE);
+        $session = $sessionId($other);
+
+        try {
+            $protectInPage($db);
+            $op = $opOf($db);
+            $before = $state();
+            $problems = [];
+
+            foreach ($changes($db, $session, $op) as $action => $payload) {
+                $problems[] = $lockedAnswer($action, $payload);
+            }
+
+            // More ways in: a script that starts with something harmless, and upkeep of the whole database.
+            $problems[] = $lockedAnswer('sql', ['db' => $db, 'sql' => 'select 1; delete from probe_locked', 'write' => true]);
+            $problems[] = $lockedAnswer('maintain', ['db' => $db, 'op' => $op]);
+
+            same([], array_values(array_filter($problems)), 'every one of these should have been refused as protected');
+            same($before, $state(), 'no table, column or row changed');
+            same(1, $sessions($session), 'the session was not stopped');
+            same('1', (string) $other->query('select 1')->fetchColumn());
+        } finally {
+            $unprotect();
+            $lockAgain($db);
+            $dropProbes($pdo);
+        }
+    });
+
+    test("{$tag} a protected database that is locked can still be read", function () use ($c, $db, $items, $count, $protectInPage, $unprotect, $lockAgain, $refusedLocked) {
+        try {
+            $protectInPage($db);
+            // It is locked: a change is refused. Everything below has to work all the same.
+            $refusedLocked('update', $items + ['keys' => [['id' => '1']], 'changes' => ['qty' => '1']]);
+
+            $tables = $c->ok('tables', ['db' => $db]);
+            check(in_array('items', array_column($tables['tables'], 'name'), true), 'tables');
+            same($count(), $c->ok('rows', $items)['total'], 'rows');
+            same('id', $c->ok('structure', $items)['table']['columns'][0]['name'], 'structure');
+            same($count(), (int) $c->ok('values', $items + ['col' => 'qty'])['stats']['total'], 'values');
+
+            $export = $c->api('export', $items + ['format' => 'csv']);
+            same(200, $export['status'], 'export');
+            check(str_contains($export['body'], 'apple'), 'export has the rows: '.substr($export['body'], 0, 200));
+
+            $select = $c->ok('sql', ['db' => $db, 'sql' => 'select count(*) from items']);
+            same($count(), (int) $select['rows'][0][0], 'sql without write');
+            $select = $c->ok('sql', ['db' => $db, 'sql' => 'select count(*) from items', 'write' => false]);
+            same($count(), (int) $select['rows'][0][0], 'sql with write: false');
+
+            // The other screens only look, too.
+            same(2, $c->ok('refs', $items + ['row' => ['id' => '1']])['refs'][0]['count'], 'refs');
+            check($c->ok('lookup', $items + ['col' => 'id', 'q' => 'app'])['items'] !== [], 'lookup');
+            check(count($c->ok('schema', ['db' => $db])['tables']) >= 5, 'schema');
+            check(count($c->ok('diagram', ['db' => $db])['tables']) >= 5, 'diagram');
+            check($c->ok('find_id', ['db' => $db, 'value' => '1'])['found'] !== [], 'find_id');
+            check(isset($c->ok('health', ['db' => $db])['findings']), 'health');
+            check(isset($c->ok('activity', ['db' => $db])['sessions']), 'activity');
+        } finally {
+            $unprotect();
+            $lockAgain($db);
+        }
+    });
+
+    test("{$tag} a protected database is not dropped while it is locked", function () use ($c, $extraId, $hasDatabase, $makeDatabase, $dropDatabase, $protectInPage, $unprotect, $lockAgain, $unlock, $refusedLocked) {
+        // A database of its own to drop: if the lock did not hold, the test database would go.
+        $makeDatabase(TEST_EXTRA_DATABASE);
+
+        try {
+            $protectInPage($extraId);
+            $refusedLocked('drop_database', ['db' => $extraId, 'confirm' => TEST_EXTRA_DATABASE], null, TEST_EXTRA_DATABASE);
+            same(true, $hasDatabase(TEST_EXTRA_DATABASE), 'a locked database is not dropped');
+
+            $unlock($extraId, TEST_EXTRA_DATABASE);
+            $c->ok('drop_database', ['db' => $extraId, 'confirm' => TEST_EXTRA_DATABASE]);
+            same(false, $hasDatabase(TEST_EXTRA_DATABASE), 'unlocked, it is dropped');
+        } finally {
+            $unprotect();
+            $lockAgain($extraId);
+            $dropDatabase(TEST_EXTRA_DATABASE);
+        }
+    });
+
+    test("{$tag} with its name typed back, a protected database takes every change", function () use ($c, $db, $pdo, $connect, $sessions, $sessionId, $count, $cell, $hasTable, $columnsOf, $probeIds, $protectInPage, $unprotect, $lockAgain, $unlock, $makeProbes, $dropProbes, $changes, $opOf) {
+        $makeProbes($pdo);
+        $other = $connect(TEST_DATABASE);
+        $session = $sessionId($other);
+
+        try {
+            $protectInPage($db);
+            $do = $changes($db, $session, $opOf($db));
+            $unlock($db, TEST_DATABASE);
+
+            $c->ok('update', $do['update']);
+            same('77', (string) $cell('qty', 1, 'probe_locked'), 'update');
+
+            $c->ok('insert', $do['insert']);
+            same('four', $cell('label', 4, 'probe_locked'), 'insert');
+
+            $c->ok('delete', $do['delete']);
+            same([1, 3, 4], $probeIds(), 'delete');
+
+            $c->ok('update_each', $do['update_each']);
+            same('88', (string) $cell('qty', 3, 'probe_locked'), 'update_each');
+
+            $c->ok('import', $do['import']);
+            same([1, 3, 4, 5], $probeIds(), 'import');
+            same('five', $cell('label', 5, 'probe_locked'));
+
+            $c->ok('sql', $do['sql']);
+            same('by sql', $cell('label', 1, 'probe_locked'), 'sql with write');
+
+            $c->ok('maintain', $do['maintain']);
+
+            $c->ok('copy_table', $do['copy_table']);
+            same([true, 4], [$hasTable('probe_locked_copy'), $count('probe_locked_copy')], 'copy_table');
+
+            $c->ok('save_column', $do['save_column']);
+            check(in_array('extra', $columnsOf('probe_locked'), true), 'save_column');
+
+            $c->ok('drop_column', $do['drop_column']);
+            check(! in_array('label', $columnsOf('probe_locked'), true), 'drop_column');
+
+            $c->ok('truncate', $do['truncate']);
+            same(0, $count('probe_locked'), 'truncate');
+
+            $c->ok('rename_table', $do['rename_table']);
+            same([false, true], [$hasTable('probe_locked_two'), $hasTable('probe_locked_renamed')], 'rename_table');
+
+            $c->ok('drop_table', $do['drop_table']);
+            same(false, $hasTable('probe_locked'), 'drop_table');
+
+            $c->ok('stop', $do['stop']);
+
+            for ($i = 0; $i < 50 && $sessions($session) > 0; $i++) {
+                usleep(100000);
+            }
+
+            same(0, $sessions($session), 'stop');
+            fails(fn () => $other->query('select 1'));
+        } finally {
+            $unprotect();
+            $lockAgain($db);
+            $dropProbes($pdo);
+        }
+    });
+
+    test("{$tag} locking a protected database again refuses its changes again", function () use ($c, $db, $pdo, $count, $qtyIn, $bump, $protectInPage, $unprotect, $lockAgain, $unlock, $makeProbes, $dropProbes, $refusedLocked) {
+        $makeProbes($pdo);
+
+        try {
+            $protectInPage($db);
+            $unlock($db, TEST_DATABASE);
+            $c->ok('update', $bump($db, '10'));
+            same('10', $qtyIn($pdo), 'unlocked, the change is kept');
+
+            same(['ok' => true], $c->ok('lock', ['db' => $db]));
+
+            $refusedLocked('update', $bump($db, '20'));
+            $refusedLocked('delete', ['db' => $db, 'table' => ['name' => 'probe_locked'], 'keys' => [['id' => '1']]]);
+            $refusedLocked('sql', ['db' => $db, 'sql' => 'delete from probe_locked', 'write' => true]);
+            same('10', $qtyIn($pdo), 'locked again, the row is as it was');
+            same(3, $count('probe_locked'));
+            same(3, $c->ok('rows', ['db' => $db, 'table' => ['name' => 'probe_locked']])['total'], 'and it can still be read');
+        } finally {
+            $unprotect();
+            $lockAgain($db);
+            $dropProbes($pdo);
+        }
+    });
+
+    test("{$tag} unlocking needs the database's own name typed exactly, and anything else unlocks nothing", function () use ($c, $db, $pdo, $count, $qtyIn, $bump, $protectInPage, $unprotect, $lockAgain, $unlock, $unlockRefused, $makeProbes, $dropProbes, $refusedLocked) {
+        $makeProbes($pdo);
+        $itemCount = $count();
+
+        try {
+            $protectInPage($db);
+
+            $wrong = [
+                'another name' => 'items',
+                'the name of another database' => TEST_EXTRA_DATABASE,
+                'the id instead of the name' => $db,
+                'the name in capitals' => strtoupper(TEST_DATABASE),
+                'the name with a letter missing' => substr(TEST_DATABASE, 0, -1),
+                'the name with a letter more' => TEST_DATABASE.'x',
+                'a single quote' => TEST_DATABASE."'",
+                'a double quote' => TEST_DATABASE.'"',
+                'a backtick' => TEST_DATABASE.'`',
+                'SQL after the name' => TEST_DATABASE."'; drop database ".TEST_DATABASE.'; --',
+                'an always true condition' => "x' or '1'='1",
+                'a star' => '*',
+                'a percent sign' => '%',
+                'nothing' => '',
+                'only spaces' => '   ',
+                'null' => null,
+            ];
+
+            foreach ($wrong as $why => $name) {
+                $r = $unlockRefused(['db' => $db, 'name' => $name], 'Type');
+                same(422, $r['status'], "unlock with {$why}");
+            }
+
+            $r = $unlockRefused(['db' => $db], 'Type');
+            same(422, $r['status'], 'unlock without a name');
+
+            // Without a database, or with one that is not on the list, there is nothing to unlock.
+            $unlockRefused(['name' => TEST_DATABASE]);
+            $unlockRefused(['db' => '', 'name' => TEST_DATABASE]);
+            $unlockRefused(['db' => 'nope/'.TEST_DATABASE, 'name' => TEST_DATABASE]);
+            $unlockRefused(['db' => $db.'; drop database '.TEST_DATABASE, 'name' => TEST_DATABASE]);
+
+            same([], $c->ok('databases')['unlocked'], 'none of them unlocked anything');
+            $refusedLocked('update', $bump($db, '99'));
+            same('1', $qtyIn($pdo), 'and the row is as it was');
+            same($itemCount, $count(), 'the SQL in a name was not run');
+
+            // The control: the right name does unlock it, so the refusals above were about the name.
+            $unlock($db, '  '.TEST_DATABASE.' ');
+            $c->ok('update', $bump($db, '99'));
+            same('99', $qtyIn($pdo));
+        } finally {
+            $unprotect();
+            $lockAgain($db);
+            $dropProbes($pdo);
+        }
+    });
+
+    test("{$tag} an unlock lasts about fifteen minutes, and a database that is not protected can be unlocked too", function () use ($c, $db, $unprotect, $lockAgain, $unlock) {
+        try {
+            // Nothing is protected: the layout is empty and the config does not list this database.
+            $unprotect();
+            $until = $unlock($db, TEST_DATABASE);
+            check(abs($until - (time() + 15 * 60)) <= 60, 'the unlock ends in 15 minutes, give or take a minute');
+            same(['ok' => true], $c->ok('lock', ['db' => $db]));
+        } finally {
+            $lockAgain($db);
+        }
+    });
+
+    test("{$tag} unlocking one database does not unlock another", function () use ($c, $db, $pdo, $extraId, $qtyIn, $bump, $protectInPage, $unprotect, $lockAgain, $unlock, $makeDatabase, $dropDatabase, $makeProbes, $dropProbes, $refusedLocked) {
+        $extra = $makeDatabase(TEST_EXTRA_DATABASE);
+
+        try {
+            $makeProbes($pdo);
+            $makeProbes($extra);
+            $protectInPage($db, $extraId);
+
+            $unlock($extraId, TEST_EXTRA_DATABASE);
+            $refusedLocked('update', $bump($db, '10'));
+            same('1', $qtyIn($pdo), 'the test database is still locked');
+            $c->ok('update', $bump($extraId, '10'));
+            same('10', $qtyIn($extra), 'the one that was unlocked takes the change');
+            same([$extraId], array_keys($c->ok('databases')['unlocked']));
+
+            // And the other way round.
+            $unlock($db, TEST_DATABASE);
+            $c->ok('lock', ['db' => $extraId]);
+            $refusedLocked('update', $bump($extraId, '20'), null, TEST_EXTRA_DATABASE);
+            same('10', $qtyIn($extra), 'the one that was locked again refuses');
+            $c->ok('update', $bump($db, '20'));
+            same('20', $qtyIn($pdo));
+            same([$db], array_keys($c->ok('databases')['unlocked']));
+        } finally {
+            $unprotect();
+            $lockAgain($db, $extraId);
+            $dropProbes($pdo);
+            $extra = null;
+            $dropDatabase(TEST_EXTRA_DATABASE);
+        }
+    });
+
+    test("{$tag} an unlock belongs to the session that made it", function () use ($c, $db, $pdo, $signIn, $qtyIn, $bump, $protectInPage, $unprotect, $lockAgain, $unlock, $makeProbes, $dropProbes, $refusedLocked) {
+        $makeProbes($pdo);
+        $other = $signIn();
+
+        try {
+            $protectInPage($db);
+            $unlock($db, TEST_DATABASE);
+
+            // A second browser, signed in as the same user, is locked out all the same.
+            $refusedLocked('update', $bump($db, '30'), $other);
+            $refusedLocked('sql', ['db' => $db, 'sql' => 'delete from probe_locked', 'write' => true], $other);
+            same('1', $qtyIn($pdo), 'nothing changed');
+            same([], $other->ok('databases')['unlocked'], 'the other session has unlocked nothing');
+            same(3, $other->ok('rows', ['db' => $db, 'table' => ['name' => 'probe_locked']])['total'], 'it can read');
+
+            $c->ok('update', $bump($db, '30'));
+            same('30', $qtyIn($pdo), 'the session that unlocked it can change it');
+        } finally {
+            $unprotect();
+            $lockAgain($db);
+            $other->api('lock', ['db' => $db]);
+            $dropProbes($pdo);
+        }
+    });
+
+    test("{$tag} a database the config protects is protected without the layout, and the page cannot lift it", function () use ($c, $db, $lockedId, $listedItems, $qtyIn, $bump, $unlock, $unlockRefused, $lockAgain, $makeDatabase, $dropDatabase, $makeProbes, $refusedLocked) {
+        $inside = $makeDatabase(TEST_LOCKED_DATABASE);
+
+        try {
+            $makeProbes($inside);
+
+            $byId = array_column($listedItems($c->ok('databases')), null, 'id');
+            check(isset($byId[$lockedId], $byId[$db]), 'both databases are on the list: '.implode(', ', array_keys($byId)));
+            same('config', array_key_exists('protected', $byId[$lockedId]) ? $byId[$lockedId]['protected'] : 'no "protected" in the item', 'the list says that the config protects it');
+            same(null, array_key_exists('protected', $byId[$db]) ? $byId[$db]['protected'] : 'no "protected" in the item', 'and that it does not protect the test database');
+
+            $refusedLocked('update', $bump($lockedId, '10'), null, TEST_LOCKED_DATABASE);
+            $refusedLocked('sql', ['db' => $lockedId, 'sql' => 'delete from probe_locked', 'write' => true], null, TEST_LOCKED_DATABASE);
+            same('1', $qtyIn($inside), 'nothing changed');
+            same(3, $c->ok('rows', ['db' => $lockedId, 'table' => ['name' => 'probe_locked']])['total'], 'it can be read');
+
+            // The layout is the page's. Saving it with nothing marked does not lift what the config protects.
+            $c->ok('layout', ['layout' => ['protected' => []]]);
+            $refusedLocked('update', $bump($lockedId, '10'), null, TEST_LOCKED_DATABASE);
+            $unlockRefused(['db' => $lockedId, 'name' => TEST_DATABASE], 'Type');
+            $refusedLocked('update', $bump($lockedId, '10'), null, TEST_LOCKED_DATABASE);
+
+            $unlock($lockedId, TEST_LOCKED_DATABASE);
+            $c->ok('update', $bump($lockedId, '10'));
+            same('10', $qtyIn($inside), 'unlocked with its name, it takes the change');
+            same([$lockedId], array_keys($c->ok('databases')['unlocked']));
+
+            $c->ok('lock', ['db' => $lockedId]);
+            $refusedLocked('update', $bump($lockedId, '20'), null, TEST_LOCKED_DATABASE);
+            same('10', $qtyIn($inside), 'locked again, it is as it was');
+        } finally {
+            $lockAgain($lockedId);
+            $inside = null;
+            $dropDatabase(TEST_LOCKED_DATABASE);
+        }
+    });
+
+    // Big tables, the count, and stopping a query. The config of the run sets count_limit to TEST_COUNT_LIMIT and
+    // count_seconds to TEST_COUNT_SECONDS. The tests work on tables and views of their own.
+    //
+    // The viewer's built-in server answers one request at a time, so a slow request cannot be stopped from the test
+    // that made it. A slow query is therefore started by db-child.php, a process of its own, and the test stops
+    // it with cancel. A count that runs out of time is brought about with a view that waits for every row it
+    // reads: $napSeconds for each of four rows is more than count_seconds, whatever the machine.
+
+    $napSeconds = 0.6;
+    $newTag = fn (string $prefix): string => $prefix.bin2hex(random_bytes(4));
+    $fillBig = function (string $table, int $from, int $to) use ($pdo, $q): void {
+        foreach (array_chunk(range($from, $to), 500) as $chunk) {
+            $pdo->exec('insert into '.$q($table).' (id, name) values '.implode(', ', array_map(fn (int $i) => "({$i}, 'row {$i}')", $chunk)));
+        }
+    };
+    $analyze = function (string $table) use ($pdo, $q, $driver): void {
+        $driver === 'pgsql' ? $pdo->exec('analyze '.$q($table)) : $pdo->query('analyze table '.$q($table))->fetchAll();
+    };
+    // What the database's own statistics say about the number of rows, read the way the tests read anything: through $pdo.
+    $estimateOf = function (string $table) use ($pdo, $driver): ?int {
+        $estimate = $pdo->query($driver === 'pgsql'
+            ? "select reltuples::bigint from pg_class where oid = 'public.{$table}'::regclass"
+            : "select table_rows from information_schema.tables where table_schema = database() and table_name = '{$table}'")->fetchColumn();
+
+        return $estimate === false || $estimate === null ? null : (int) $estimate;
+    };
+    $dropNap = function () use ($pdo, $driver, $dropTables): void {
+        $pdo->exec('drop view if exists probe_nap_view');
+        $driver === 'pgsql' && $pdo->exec('drop function if exists probe_nap_wait()');
+        $dropTables('probe_nap');
+    };
+    $makeNap = function () use ($pdo, $driver, $dropNap, $napSeconds): void {
+        $dropNap();
+        $pdo->exec('create table probe_nap (id integer primary key, name varchar(50))');
+        $pdo->exec("insert into probe_nap values (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')");
+
+        if ($driver === 'pgsql') {
+            $pdo->exec("create function probe_nap_wait() returns boolean language plpgsql as \$\$ begin perform pg_sleep({$napSeconds}); return true; end \$\$");
+            $pdo->exec('create view probe_nap_view as select id, name from probe_nap where probe_nap_wait()');
+        } else {
+            $pdo->exec("create view probe_nap_view as select id, name from probe_nap where sleep({$napSeconds}) = 0");
+        }
+    };
+
+    // A process of its own (see db-child.php) and what the test needs to know about it.
+    $child = function (string $mode, string ...$args) use ($settings): array {
+        $result = tempnam(sys_get_temp_dir(), 'sqlaris-child');
+        unlink($result);
+        $env = getenv();
+        $env['SQLARIS_TEST_SERVER'] = json_encode($settings);
+        $process = proc_open([PHP_BINARY, __DIR__.'/db-child.php', $result, $mode, ...$args],
+            [0 => ['pipe', 'r'], 1 => ['file', $result.'.log', 'w'], 2 => ['file', $result.'.log', 'a']], $pipes, null, $env);
+        check(is_resource($process), 'the helper process did not start');
+        fclose($pipes[0]);
+
+        return ['process' => $process, 'result' => $result];
+    };
+    $until = function (callable $condition, float $seconds = 10.0): bool {
+        $end = microtime(true) + $seconds;
+
+        while (microtime(true) < $end) {
+            if ($condition()) {
+                return true;
+            }
+
+            usleep(50000);
+        }
+
+        return (bool) $condition();
+    };
+    // What the helper wrote when it was over, or null when it did not end in time.
+    $finished = function (array $helper, float $seconds = 15.0) use ($until): ?array {
+        $over = $until(fn () => ! proc_get_status($helper['process'])['running'], $seconds);
+        $answer = $over && is_file($helper['result']) ? json_decode((string) file_get_contents($helper['result']), true) : null;
+
+        return is_array($answer) ? $answer : null;
+    };
+    $endChild = function (array $helper): void {
+        if (proc_get_status($helper['process'])['running']) {
+            proc_terminate($helper['process']);
+        }
+
+        proc_close($helper['process']);
+
+        foreach ([$helper['result'], $helper['result'].'.ready', $helper['result'].'.log'] as $file) {
+            is_file($file) && unlink($file);
+        }
+    };
+    // The statements of the server that carry this tag, in a database. They are looked at through $pdo, from outside the viewer.
+    $running = function (string $tagValue, string $database = TEST_DATABASE) use ($pdo, $driver): int {
+        $look = $pdo->prepare($driver === 'pgsql'
+            ? "select count(*) from pg_stat_activity where pid <> pg_backend_pid() and state = 'active' and datname = ? and query like ?"
+            : "select count(*) from information_schema.processlist where id <> connection_id() and command = 'Query' and db = ? and info like ?");
+        $look->execute([$database, "%/* sqlaris:{$tagValue} */%"]);
+
+        return (int) $look->fetchColumn();
+    };
+    // The sessions of a database that have this tag in their current statement or, on PostgreSQL, their last one. Cancel counts
+    // the idle ones too, so a test that expects it to stop nothing first waits for the session of a stopped query to go.
+    $lingering = function (string $tagValue, string $database = TEST_DATABASE) use ($pdo, $driver, $running): int {
+        if ($driver !== 'pgsql') {
+            return $running($tagValue, $database);
+        }
+
+        $look = $pdo->prepare('select count(*) from pg_stat_activity where pid <> pg_backend_pid() and datname = ? and query like ?');
+        $look->execute([$database, "%/* sqlaris:{$tagValue} */%"]);
+
+        return (int) $look->fetchColumn();
+    };
+    // A test that fails half way must not leave a query running for half a minute.
+    $killTagged = function (string ...$tags) use ($pdo, $driver): void {
+        foreach ($tags as $tagValue) {
+            $find = $pdo->prepare($driver === 'pgsql'
+                ? 'select pid from pg_stat_activity where pid <> pg_backend_pid() and query like ?'
+                : 'select id from information_schema.processlist where id <> connection_id() and info like ?');
+            $find->execute(["%/* sqlaris:{$tagValue} */%"]);
+
+            foreach ($find->fetchAll(PDO::FETCH_COLUMN) as $id) {
+                $pdo->exec($driver === 'pgsql' ? 'select pg_terminate_backend('.(int) $id.')' : 'kill '.(int) $id);
+            }
+        }
+    };
+    $nap = $driver === 'pgsql' ? 'pg_sleep' : 'sleep';
+    $slowQuery = fn (string $tagValue): string => "select /* sqlaris:{$tagValue} */ {$nap}(30)";
+
+    test("{$tag} a small table and a view are counted, and the answer says the count is exact", function () use ($c, $db, $items, $count, $pdo) {
+        $r = $c->ok('rows', $items);
+        same(true, $r['exact'] ?? 'missing', 'a table under count_limit');
+        same($count(), $r['total']);
+
+        $r = $c->ok('rows', ['db' => $db, 'table' => ['name' => 'cheap_items']]);
+        same(true, $r['exact'] ?? 'missing', 'a view');
+        same((int) $pdo->query('select count(*) from cheap_items')->fetchColumn(), $r['total']);
+    });
+
+    test("{$tag} a table past count_limit answers the catalog's estimate and says it is not exact, until a search or a filter narrows it", function () use ($c, $db, $pdo, $estimateOf, $analyze, $fillBig, $dropTables) {
+        $pdo->exec('drop view if exists probe_big_view');
+        $dropTables('probe_big');
+        $pdo->exec('create table probe_big (id integer primary key, name varchar(50))');
+        $pdo->exec('create view probe_big_view as select id, name from probe_big');
+        $analysed = 3 * TEST_COUNT_LIMIT;
+        $all = $analysed + 500;
+        $big = ['db' => $db, 'table' => ['name' => 'probe_big']];
+
+        try {
+            $fillBig('probe_big', 1, $analysed);
+            $analyze('probe_big');
+            // More rows after the statistics were made, so that where a system keeps the two apart, a count and the estimate differ.
+            $fillBig('probe_big', $analysed + 1, $all);
+
+            $before = $estimateOf('probe_big');
+            $r = $c->ok('rows', $big);
+            $after = $estimateOf('probe_big');
+
+            check($before !== null && $before >= TEST_COUNT_LIMIT, "the table is past count_limit by the catalog's own numbers: {$before}");
+            same(false, $r['exact'] ?? 'missing', 'past the limit it is not counted');
+            check(in_array($r['total'], [$before, $after], true), "the total is the catalog's estimate ({$before}, then {$after}): ".json_encode($r['total']));
+            same(50, count($r['rows']), 'the first page of rows comes back');
+
+            $r = $c->ok('rows', $big + ['page' => 2, 'perPage' => 10]);
+            same([false, 10], [$r['exact'] ?? 'missing', count($r['rows'])], 'the second page');
+
+            // A search or a filter narrows the table, and a narrow count is a count.
+            $r = $c->ok('rows', $big + ['search' => 'row 17']);
+            same(true, $r['exact'] ?? 'missing', 'a search');
+            same((int) $pdo->query("select count(*) from probe_big where name like '%row 17%'")->fetchColumn(), $r['total']);
+
+            $r = $c->ok('rows', $big + ['filters' => [['col' => 'id', 'op' => 'gt', 'value' => (string) ($all - 10)]]]);
+            same([true, 10], [$r['exact'] ?? 'missing', $r['total']], 'a filter');
+
+            // A view has no estimate of its own, so it is counted, however big the table under it.
+            $r = $c->ok('rows', ['db' => $db, 'table' => ['name' => 'probe_big_view']]);
+            same([true, $all], [$r['exact'] ?? 'missing', $r['total']], 'a view');
+        } finally {
+            $pdo->exec('drop view if exists probe_big_view');
+            $dropTables('probe_big');
+        }
+    });
+
+    if ($driver === 'pgsql') {
+        // PostgreSQL has no row count for a table nobody has analysed (-1, or 0 before PostgreSQL 14), so the count is made.
+        test("{$tag} a table past count_limit that has never been analysed has no estimate, so it is counted", function () use ($c, $db, $pdo, $estimateOf, $fillBig, $dropTables) {
+            $dropTables('probe_fresh');
+            $pdo->exec('create table probe_fresh (id integer primary key, name varchar(50))');
+
+            try {
+                $fillBig('probe_fresh', 1, 3 * TEST_COUNT_LIMIT);
+                $before = $estimateOf('probe_fresh');
+                $r = $c->ok('rows', ['db' => $db, 'table' => ['name' => 'probe_fresh']]);
+                $after = $estimateOf('probe_fresh');
+
+                // The autovacuum worker may analyse the table between the calls. Then there is an estimate, and nothing to test.
+                if ($before < TEST_COUNT_LIMIT && $after < TEST_COUNT_LIMIT) {
+                    same([true, 3 * TEST_COUNT_LIMIT], [$r['exact'] ?? 'missing', $r['total']]);
+                }
+            } finally {
+                $dropTables('probe_fresh');
+            }
+        });
+    }
+
+    test("{$tag} a count that runs past count_seconds gives up, and the rows still come back", function () use ($c, $db, $makeNap, $dropNap) {
+        $makeNap();
+        $view = ['db' => $db, 'table' => ['name' => 'probe_nap_view']];
+
+        try {
+            // Nothing is asked for, so a view has no estimate to fall back on either: the total is not known.
+            $r = $c->ok('rows', $view);
+            same(false, $r['exact'] ?? 'missing', 'no search or filter');
+            check($r['total'] === null || (is_int($r['total']) && $r['total'] !== 4), 'a count that did not finish is not the count: '.json_encode($r['total']));
+            $names = array_column($r['rows'], 1);
+            sort($names);
+            same(['a', 'b', 'c', 'd'], $names, 'the rows come back');
+
+            // The filter lets every row through, so the count has as much to wait for.
+            $r = $c->ok('rows', $view + ['filters' => [['col' => 'id', 'op' => 'gt', 'value' => '0']]]);
+            same([false, null, 4], [$r['exact'] ?? 'missing', $r['total'], count($r['rows'])], 'with a filter the total is null, and the rows come back');
+        } finally {
+            $dropNap();
+        }
+    });
+
+    test("{$tag} the rows and the count of a request with a tag carry the tag as a comment", function () use ($c, $db, $newTag, $makeNap, $dropNap, $child, $until, $finished, $endChild) {
+        $makeNap();
+        $one = $newTag('rows');
+        $watch = null;
+
+        try {
+            // The count is made while the rows' own query ends first, and both are slow, so a look every few
+            // milliseconds from another process sees them.
+            $watch = $child('watch', TEST_DATABASE, "/* sqlaris:{$one} */", '25', '2');
+            check($until(fn () => is_file($watch['result'].'.ready')), 'the helper that watches the server did not start');
+
+            $c->ok('rows', ['db' => $db, 'table' => ['name' => 'probe_nap_view'], 'tag' => $one]);
+
+            $seen = $finished($watch, 30);
+            check($seen !== null, 'the helper that watches the server did not report');
+            $counting = array_values(array_filter($seen, fn (string $statement) => preg_match('/count\s*\(/i', $statement) === 1));
+            check(count($counting) >= 1, 'no statement with the tag counts: '.json_encode($seen));
+            check(count($seen) - count($counting) >= 1, 'no other statement carries the tag, so the rows do not: '.json_encode($seen));
+        } finally {
+            $watch !== null && $endChild($watch);
+            $dropNap();
+        }
+    });
+
+    test("{$tag} a tag that is not 8 to 32 lowercase letters or digits is ignored, and what is in it is never run", function () use ($c, $items, $newTag, $count) {
+        $request = $items + ['perPage' => 3, 'sort' => ['col' => 'id', 'dir' => 'asc']];
+        $plain = $c->ok('rows', $request);
+        $before = $count();
+
+        $odd = [
+            'seven characters' => 'abcdefg',
+            'thirty-three characters' => str_repeat('a', 33),
+            'capitals' => 'ABCDEFGH12',
+            'a space' => 'abcd efgh',
+            'a dash' => 'abcd-efgh',
+            'the end of a comment' => 'abcdefgh*/',
+            'SQL after the end of a comment' => 'abcdefgh */ ; drop table items; /* ',
+            'wildcards' => '%%%%%%%%',
+            'letters with accents' => 'éééééééé',
+            'nothing' => '',
+        ];
+
+        foreach ($odd as $why => $tagValue) {
+            same($plain['rows'], $c->ok('rows', $request + ['tag' => $tagValue])['rows'], "a tag with {$why} changes nothing");
+        }
+
+        // The shortest and the longest that are allowed work the same.
+        foreach ([$newTag(''), substr(str_repeat('a1', 20), 0, 32)] as $good) {
+            same($plain['rows'], $c->ok('rows', $request + ['tag' => $good])['rows'], 'a tag of '.strlen($good).' characters');
+        }
+
+        same($before, $count(), 'nothing in a tag reached the database');
+    });
+
+    test("{$tag} rows come in the order the database gives them, page after page, with or without a tag", function () use ($c, $db, $pdo, $newTag, $dropTables) {
+        $dropTables('probe_order');
+        $pdo->exec('create table probe_order (id integer primary key, label varchar(20))');
+        $pdo->exec('insert into probe_order values '.implode(', ', array_map(fn (int $i) => "({$i}, 'n{$i}')", range(1, 25))));
+        $table = ['db' => $db, 'table' => ['name' => 'probe_order']];
+        $ids = fn (array $answer): array => array_map('intval', array_column($answer['rows'], 0));
+        $expected = fn (string $order, int $page): array => array_map('intval', $pdo->query("select id from probe_order{$order} limit 10 offset ".(($page - 1) * 10))->fetchAll(PDO::FETCH_COLUMN));
+
+        try {
+            $sorts = ['' => null, ' order by id asc' => ['col' => 'id', 'dir' => 'asc'], ' order by id desc' => ['col' => 'id', 'dir' => 'desc']];
+
+            foreach ($sorts as $order => $sort) {
+                foreach ([1, 2, 3] as $page) {
+                    $request = $table + ['perPage' => 10, 'page' => $page] + ($sort === null ? [] : ['sort' => $sort]);
+                    $plain = $c->ok('rows', $request);
+                    $tagged = $c->ok('rows', $request + ['tag' => $newTag('order')]);
+
+                    same($expected($order, $page), $ids($plain), "page {$page}{$order}");
+                    same($ids($plain), $ids($tagged), "page {$page}{$order}, with a tag");
+                    same([25, true], [$plain['total'], $plain['exact'] ?? 'missing'], "the count on page {$page}{$order}");
+                }
+            }
+        } finally {
+            $dropTables('probe_order');
+        }
+    });
+
+    test("{$tag} cancel stops the running queries that carry the tag in this database, and no others", function () use ($c, $db, $driver, $newTag, $child, $until, $finished, $endChild, $running, $lingering, $killTagged, $slowQuery) {
+        $one = $newTag('cancel');
+        $longer = $one.'x';
+        $elsewhere = $driver === 'pgsql' ? 'postgres' : 'mysql';
+        $helpers = [];
+
+        try {
+            $helpers['one'] = $child('run', TEST_DATABASE, $slowQuery($one));
+            // The tag of this one starts with the tag that is stopped.
+            $helpers['longer'] = $child('run', TEST_DATABASE, $slowQuery($longer));
+            $helpers['elsewhere'] = $child('run', $elsewhere, $slowQuery($one));
+
+            check($until(fn () => $running($one) === 1 && $running($longer) === 1 && $running($one, $elsewhere) === 1, 20),
+                'the three slow queries are not all running: '.json_encode([$running($one), $running($longer), $running($one, $elsewhere)]));
+
+            same(1, $c->ok('cancel', ['db' => $db, 'tag' => $one])['stopped'], 'one query in this database carries the tag');
+            $answer = $finished($helpers['one']);
+            check($answer !== null && $answer['seconds'] < 15, 'the query was cut short, not left to run its 30 seconds: '.json_encode($answer));
+            same(0, $running($one), 'it is no longer running');
+            same(1, $running($longer), 'a query whose tag only starts with it keeps running');
+            same(1, $running($one, $elsewhere), 'and so does the query with the same tag in another database');
+
+            check($until(fn () => $lingering($one) === 0, 10), 'the session of the stopped query is gone');
+            same(0, $c->ok('cancel', ['db' => $db, 'tag' => $one])['stopped'], 'nothing runs under it now');
+            // Only the tag as a whole counts: not the start of one, not a wildcard.
+            same(0, $c->ok('cancel', ['db' => $db, 'tag' => substr($longer, 0, 10)])['stopped'], 'the start of a tag');
+            $c->refused('cancel', ['db' => $db, 'tag' => '%'], 'Refresh and try again');
+            $c->refused('cancel', ['db' => $db, 'tag' => 'cancel%'], 'Refresh and try again');
+            same(1, $running($longer), 'neither stopped it');
+
+            same(1, $c->ok('cancel', ['db' => $db, 'tag' => $longer])['stopped']);
+            $answer = $finished($helpers['longer']);
+            check($answer !== null && $answer['seconds'] < 15, 'the second query was cut short too: '.json_encode($answer));
+            same(1, $running($one, $elsewhere), 'the query in the other database was left alone all the time');
+        } finally {
+            $killTagged($one, $longer);
+
+            foreach ($helpers as $helper) {
+                $endChild($helper);
+            }
+        }
+    });
+
+    test("{$tag} cancel with a tag nothing runs under stops nothing, and a missing or malformed tag is refused", function () use ($c, $db, $newTag) {
+        same(0, $c->ok('cancel', ['db' => $db, 'tag' => $newTag('nothing')])['stopped']);
+        same(0, $c->ok('cancel', ['db' => $db, 'tag' => 'abcdefgh'])['stopped'], 'a tag of 8 characters');
+        same(0, $c->ok('cancel', ['db' => $db, 'tag' => substr(str_repeat('z9', 20), 0, 32)])['stopped'], 'a tag of 32 characters');
+
+        $odd = [
+            'seven characters' => 'abcdefg',
+            'thirty-three characters' => str_repeat('a', 33),
+            'capitals' => 'ABCDEFGH12',
+            'a space' => 'abcd efgh',
+            'an underscore, which LIKE reads as any character' => 'abcdefg_',
+            'a percent sign, which LIKE reads as anything' => 'abcdefg%',
+            'only percent signs' => '%%%%%%%%',
+            'a quote' => "abcdefg'",
+            'SQL' => "abcdefgh' or '1'='1",
+            'the end of a comment' => 'abcdefgh */ x',
+            'letters with accents' => 'éééééééé',
+            'nothing' => '',
+        ];
+
+        foreach ($odd as $why => $tagValue) {
+            $c->refused('cancel', ['db' => $db, 'tag' => $tagValue], 'Refresh and try again');
+        }
+
+        $c->refused('cancel', ['db' => $db], 'Refresh and try again');
+        $c->refused('cancel', ['db' => $db, 'tag' => null], 'Refresh and try again');
+        $c->refused('cancel', ['db' => 'nope/x', 'tag' => $newTag('nowhere')], 'not on the list');
+    });
+
+    test("{$tag} cancel is not a change, so it works on a protected database that is locked", function () use ($c, $db, $pdo, $newTag, $child, $until, $finished, $endChild, $running, $killTagged, $slowQuery, $bump, $protectInPage, $unprotect, $lockAgain, $makeProbes, $dropProbes, $refusedLocked) {
+        $makeProbes($pdo);
+        $one = $newTag('locked');
+        $helper = null;
+
+        try {
+            $helper = $child('run', TEST_DATABASE, $slowQuery($one));
+            check($until(fn () => $running($one) === 1, 20), 'the slow query is not running');
+
+            $protectInPage($db);
+            $refusedLocked('update', $bump($db, '5'));
+
+            same(1, $c->ok('cancel', ['db' => $db, 'tag' => $one])['stopped']);
+            $answer = $finished($helper);
+            check($answer !== null && $answer['seconds'] < 15, 'the query was cut short: '.json_encode($answer));
+        } finally {
+            $unprotect();
+            $lockAgain($db);
+            $killTagged($one);
+            $helper !== null && $endChild($helper);
+            $dropProbes($pdo);
+        }
+    });
+
+    // Backup, restore and compare. The tests work on tables of their own, and on sqlaris_test_extra, which they make
+    // through $pdo and drop again. A backup is a download, so it comes back as text and not as JSON.
+
+    $schemaName = $driver === 'pgsql' ? 'public' : TEST_DATABASE;
+    $tableRef = fn (string $name, ?string $schema = null): array => ['schema' => $schema ?? $schemaName, 'name' => $name];
+    $bare = fn (string $key): string => (string) preg_replace('/^[^.]*\./', '', $key);
+    $lines = fn (string $text): array => preg_split('/\r\n|\r|\n|\x{2028}|\x{2029}/u', $text);
+    // The lines of the file before its first blank line: the comment the file starts with.
+    $backupHeader = function (string $body) use ($lines): array {
+        $header = [];
+
+        foreach ($lines($body) as $line) {
+            if (trim($line) === '') {
+                break;
+            }
+
+            $header[] = $line;
+        }
+
+        return $header;
+    };
+
+    // Splits a script into statements the way the page does: at a ; that is not in a string, a quoted name, a comment
+    // or a dollar quote. A piece with nothing but comments in it is not a statement.
+    $splitScript = function (string $script) use ($driver): array {
+        $mysql = $driver !== 'pgsql';
+        $length = strlen($script);
+        $statements = [];
+        $current = '';
+        $code = false;
+        $i = 0;
+
+        while ($i < $length) {
+            $char = $script[$i];
+            $two = substr($script, $i, 2);
+
+            if (($two === '--' && (! $mysql || $i + 2 >= $length || ctype_space($script[$i + 2]))) || ($mysql && $char === '#')) {
+                $end = strpos($script, "\n", $i);
+                $end = $end === false ? $length : $end;
+                $current .= substr($script, $i, $end - $i);
+                $i = $end;
+            } elseif ($two === '/*') {
+                $end = strpos($script, '*/', $i + 2);
+                $end = $end === false ? $length : $end + 2;
+                $current .= substr($script, $i, $end - $i);
+                $i = $end;
+            } elseif ($char === "'" || $char === '"' || $char === '`') {
+                // A backslash escapes in a MySQL string, and in a PostgreSQL E'...' string. A doubled quote never ends the string.
+                $escapes = $char !== '`' && ($mysql || ($char === "'" && $i > 0 && ($script[$i - 1] === 'e' || $script[$i - 1] === 'E') && ($i < 2 || ! preg_match('/\w/', $script[$i - 2]))));
+                $j = $i + 1;
+
+                while ($j < $length) {
+                    if ($escapes && $script[$j] === '\\') {
+                        $j += 2;
+                    } elseif ($script[$j] === $char && ($script[$j + 1] ?? '') === $char) {
+                        $j += 2;
+                    } elseif ($script[$j] === $char) {
+                        $j++;
+
+                        break;
+                    } else {
+                        $j++;
+                    }
+                }
+
+                $current .= substr($script, $i, $j - $i);
+                $i = $j;
+                $code = true;
+            } elseif (! $mysql && $char === '$' && preg_match('/\G\$(?:[A-Za-z_]\w*)?\$/', $script, $tagMatch, 0, $i)) {
+                $end = strpos($script, $tagMatch[0], $i + strlen($tagMatch[0]));
+                $end = $end === false ? $length : $end + strlen($tagMatch[0]);
+                $current .= substr($script, $i, $end - $i);
+                $i = $end;
+                $code = true;
+            } elseif ($char === ';') {
+                $code && $statements[] = trim($current);
+                $current = '';
+                $code = false;
+                $i++;
+            } else {
+                $current .= $char;
+                $code = $code || ! ctype_space($char);
+                $i++;
+            }
+        }
+
+        $code && $statements[] = trim($current);
+
+        return $statements;
+    };
+
+    // Two tables with a key between them and a view over both, with the data a dump gets wrong first: NULL next to an
+    // empty string, quotes, backslashes, a ; and a comment inside a value, line breaks, unicode, dates and times, a
+    // boolean, bytes that are not text, JSON, a number with decimals, defaults and comments. PostgreSQL adds an
+    // identity column that is always generated, a serial and an enum; MySQL a geometry. A third table stands alone.
+    $dropBackupTables = function (PDO $on) use ($driver): void {
+        $on->exec('drop view if exists probe_bk_view');
+
+        foreach (['probe_bk_child', 'probe_bk_parent', 'probe_bk_solo'] as $table) {
+            $on->exec("drop table if exists {$table}");
+        }
+
+        $driver === 'pgsql' && $on->exec('drop type if exists probe_bk_mood');
+    };
+    $makeBackupTables = function () use ($pdo, $driver, $dropBackupTables): void {
+        $dropBackupTables($pdo);
+
+        if ($driver === 'pgsql') {
+            $pdo->exec(<<<'SQL'
+                create type probe_bk_mood as enum ('happy', 'sad', 'it''s "odd"')
+                SQL);
+            $pdo->exec(<<<'SQL'
+                create table probe_bk_parent (
+                    id integer generated always as identity primary key,
+                    label text not null,
+                    note text,
+                    mood probe_bk_mood,
+                    happened date,
+                    stamp timestamp(6),
+                    stamptz timestamptz(3),
+                    flag boolean,
+                    raw bytea,
+                    doc jsonb,
+                    qty numeric(10,2) not null default 1.50,
+                    ser serial,
+                    weird text default 'it''s a \ default'
+                )
+                SQL);
+            $pdo->exec("comment on table probe_bk_parent is 'a table with a \"quote\" and it''s awkward'");
+            $pdo->exec("comment on column probe_bk_parent.note is 'a note with a \"quote\" and it''s awkward'");
+            $pdo->exec('create index probe_bk_label_idx on probe_bk_parent (label)');
+            $pdo->exec('create table probe_bk_child (id serial primary key, parent_id integer not null references probe_bk_parent (id) on delete cascade, memo text)');
+            $insert = $pdo->prepare("insert into probe_bk_parent (label, note, mood, happened, stamp, stamptz, flag, raw, doc, qty)
+                values (?, ?, ?::probe_bk_mood, ?::date, ?::timestamp, ?::timestamptz, ?::boolean, decode(?, 'hex'), ?::jsonb, ?::numeric)");
+            $rows = [
+                ["x'); drop table probe_bk_parent; --", null, null, null, null, null, null, null, null, '0.00'],
+                ["it's \"quoted\" \\ back\\slash ; -- x /* y */ \$\$", "line1\nline2\r\n\ttab ;\n-- not a comment", 'it\'s "odd"', '2024-02-29', '2024-02-29 23:59:59.123456',
+                    '2024-02-29 23:59:59.123+00', 'true', '00ff10275c', '{"a": [1, 2, {"b": null}], "q": "it\'s"}', '12345678.90'],
+                ['héllo 日本語 😀', '', 'happy', '1000-01-01', '1970-01-01 00:00:01', '1970-01-01 00:00:01+00', 'false', '', '[]', '-0.01'],
+            ];
+        } else {
+            $pdo->exec(<<<'SQL'
+                create table probe_bk_parent (
+                    id int auto_increment primary key,
+                    label varchar(200) not null,
+                    note text comment 'a note with a "quote" and it''s awkward',
+                    mood enum('happy', 'sad', 'it''s "odd"'),
+                    happened date,
+                    stamp timestamp(6) null default null,
+                    moment datetime(3),
+                    flag tinyint(1),
+                    raw blob,
+                    doc json,
+                    qty decimal(10,2) not null default 1.50,
+                    area point,
+                    weird varchar(100) default 'it''s a \\ default',
+                    key probe_bk_label_idx (label)
+                ) comment='a table with a "quote" and it''s awkward'
+                SQL);
+            $pdo->exec('create table probe_bk_child (id int auto_increment primary key, parent_id int not null, memo text,
+                constraint probe_bk_fk foreign key (parent_id) references probe_bk_parent (id) on delete cascade)');
+            $insert = $pdo->prepare('insert into probe_bk_parent (label, note, mood, happened, stamp, moment, flag, raw, doc, qty, area)
+                values (?, ?, ?, ?, ?, ?, ?, unhex(?), ?, ?, ST_GeomFromText(?))');
+            $rows = [
+                ["x'); drop table probe_bk_parent; --", null, null, null, null, null, null, null, null, '0.00', 'POINT(1 2)'],
+                ["it's \"quoted\" \\ back\\slash ; -- x /* y */ \$\$", "line1\nline2\r\n\ttab ;\n-- not a comment", 'it\'s "odd"', '2024-02-29', '2024-02-29 23:59:59.123456',
+                    '2024-02-29 23:59:59.123', 1, '00ff10275c', '{"a": [1, 2, {"b": null}], "q": "it\'s"}', '12345678.90', 'POINT(-3.5 4.25)'],
+                ['héllo 日本語 😀', '', 'happy', '1000-01-01', '1970-01-01 00:00:01', '9999-12-31 23:59:59.999', 0, '', '[]', '-0.01', 'POINT(0 0)'],
+            ];
+        }
+
+        foreach ($rows as $row) {
+            $insert->execute($row);
+        }
+
+        $pdo->exec("insert into probe_bk_child (parent_id, memo) values (1, 'one'), (2, null), (2, 'two ''x'' \\\\')");
+        $pdo->exec('create view probe_bk_view as select p.id, p.label, c.memo from probe_bk_parent p join probe_bk_child c on c.parent_id = p.id');
+        $pdo->exec('create table probe_bk_solo (id integer primary key, v varchar(50))');
+        $pdo->exec("insert into probe_bk_solo values (1, 'alone')");
+    };
+    // Every row of the parent, the child and the view, in the order of their keys, read the way a person would: the
+    // bytes as hex and the geometry as text.
+    $readBackupTables = function (PDO $on) use ($driver): array {
+        $parent = $driver === 'pgsql'
+            ? "select id, label, note, mood::text, happened, stamp, stamptz, flag, encode(raw, 'hex'), doc::text, qty, ser, weird from probe_bk_parent order by id"
+            : 'select id, label, note, mood, happened, stamp, moment, flag, hex(raw), doc, qty, ST_AsText(area), weird from probe_bk_parent order by id';
+
+        return array_map(fn (string $sql): array => $on->query($sql)->fetchAll(PDO::FETCH_NUM), [
+            $parent,
+            'select id, parent_id, memo from probe_bk_child order by id',
+            'select id, label, memo from probe_bk_view order by id, memo',
+        ]);
+    };
+    // What the catalog says about the parent, the child and the view: each column with its type, null and default, and every comment.
+    $describeBackupTables = function (PDO $on) use ($driver, $schema): array {
+        $columns = $on->query($driver === 'pgsql'
+            ? "select table_name, column_name, ordinal_position, column_default, is_nullable, data_type, udt_name, character_maximum_length, numeric_precision, numeric_scale,
+                datetime_precision, is_identity, identity_generation
+                from information_schema.columns where table_schema = {$schema} and table_name in ('probe_bk_parent', 'probe_bk_child', 'probe_bk_view') order by table_name, ordinal_position"
+            : "select table_name, column_name, ordinal_position, column_default, is_nullable, column_type, extra, column_comment, character_set_name, collation_name
+                from information_schema.columns where table_schema = {$schema} and table_name in ('probe_bk_parent', 'probe_bk_child', 'probe_bk_view') order by table_name, ordinal_position")->fetchAll(PDO::FETCH_NUM);
+        $comments = $on->query($driver === 'pgsql'
+            ? "select c.relname, a.attname, coalesce(col_description(c.oid, a.attnum), '') from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                join pg_attribute a on a.attrelid = c.oid where n.nspname = 'public' and c.relname in ('probe_bk_parent', 'probe_bk_child', 'probe_bk_view') and a.attnum > 0 and not a.attisdropped
+                union all select c.relname, '', coalesce(obj_description(c.oid, 'pg_class'), '') from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                where n.nspname = 'public' and c.relname in ('probe_bk_parent', 'probe_bk_child', 'probe_bk_view') order by 1, 2"
+            : "select table_name, '', table_comment from information_schema.tables where table_schema = {$schema} and table_name in ('probe_bk_parent', 'probe_bk_child', 'probe_bk_view') order by 1")->fetchAll(PDO::FETCH_NUM);
+
+        return [$columns, $comments];
+    };
+
+    test("{$tag} a backup restores into an empty database with every row, default, key, index, comment and view, and the numbering carries on", function () use ($c, $db, $extraId, $pdo, $driver, $tableRef, $splitScript, $backupHeader, $makeBackupTables, $dropBackupTables, $readBackupTables, $describeBackupTables, $makeDatabase, $dropDatabase, $indexesOf) {
+        $extra = $makeDatabase(TEST_EXTRA_DATABASE);
+
+        try {
+            $makeBackupTables();
+
+            $backup = $c->api('backup', ['db' => $db, 'tables' => array_map($tableRef, ['probe_bk_parent', 'probe_bk_child', 'probe_bk_view'])]);
+
+            same(200, $backup['status'], 'the backup: '.substr($backup['body'], 0, 300));
+            check(preg_match('/^Content-Type:\s*application\/sql/mi', $backup['headers']) === 1, 'it is an application/sql download: '.$backup['headers']);
+            $header = $backupHeader($backup['body']);
+            check($header !== [] && count(array_filter($header, fn (string $line) => ! str_starts_with($line, '--'))) === 0, 'the file starts with comment lines: '.json_encode($header));
+            check(! str_contains($backup['body'], 'probe_bk_solo'), 'a table that was not picked is not in it');
+
+            $c->ok('restore', ['db' => $extraId, 'statements' => $splitScript($backup['body'])]);
+
+            // Every row, in the order of its key: the same values in both. And the same columns, defaults, null rules and comments.
+            $here = $readBackupTables($pdo);
+            same(3, count($here[0]), 'the fixture has its three rows');
+            same($here, $readBackupTables($extra), 'the rows of the parent, the child and the view');
+            same($describeBackupTables($pdo), $describeBackupTables($extra), 'the columns, defaults and comments');
+            $indexes = $indexesOf($extra, 'probe_bk_parent');
+            check(in_array('probe_bk_label_idx', $indexes, true), 'the index came along: '.implode(', ', $indexes));
+
+            // The next number carries on past the highest one in the table.
+            $highest = (int) $pdo->query('select max(id) from probe_bk_parent')->fetchColumn();
+
+            if ($driver === 'pgsql') {
+                $next = (int) $extra->query("insert into probe_bk_parent (label) values ('next') returning id")->fetchColumn();
+                $nextSerial = (int) $extra->query("select ser from probe_bk_parent where label = 'next'")->fetchColumn();
+                $nextChild = (int) $extra->query("insert into probe_bk_child (parent_id) values (1) returning id")->fetchColumn();
+                check($nextSerial > (int) $pdo->query('select max(ser) from probe_bk_parent')->fetchColumn(), "the serial column carries on: {$nextSerial}");
+                same('ALWAYS', $extra->query("select identity_generation from information_schema.columns where table_name = 'probe_bk_parent' and column_name = 'id'")->fetchColumn(), 'the identity column is still always generated');
+                same($pdo->query("select enumlabel from pg_enum e join pg_type t on t.oid = e.enumtypid where t.typname = 'probe_bk_mood' order by e.enumsortorder")->fetchAll(PDO::FETCH_COLUMN),
+                    $extra->query("select enumlabel from pg_enum e join pg_type t on t.oid = e.enumtypid where t.typname = 'probe_bk_mood' order by e.enumsortorder")->fetchAll(PDO::FETCH_COLUMN), 'the enum has its values');
+            } else {
+                $extra->exec("insert into probe_bk_parent (label) values ('next')");
+                $next = (int) $extra->lastInsertId();
+                $extra->exec('insert into probe_bk_child (parent_id) values (1)');
+                $nextChild = (int) $extra->lastInsertId();
+            }
+
+            check($next > $highest, "the next id of the parent is past {$highest}: {$next}");
+            check($nextChild > 3, "the next id of the child is past 3: {$nextChild}");
+
+            // The key between the two tables came along: a child needs its parent, and goes with it.
+            fails(fn () => $extra->exec('insert into probe_bk_child (parent_id) values (999999)'));
+            $extra->exec('delete from probe_bk_parent where id = 2');
+            same(0, (int) $extra->query('select count(*) from probe_bk_child where parent_id = 2')->fetchColumn(), 'the children of a deleted parent are deleted with it');
+            check((int) $extra->query('select count(*) from probe_bk_child where parent_id = 1')->fetchColumn() > 0, 'and the others are not');
+        } finally {
+            $extra = null;
+            $dropBackupTables($pdo);
+            $dropDatabase(TEST_EXTRA_DATABASE);
+        }
+    });
+
+    test("{$tag} a backup without rows has the tables and no rows, and a backup of picked tables has only those", function () use ($c, $db, $extraId, $pdo, $tableRef, $splitScript, $makeBackupTables, $dropBackupTables, $makeDatabase, $dropDatabase, $tablesOf) {
+        $extra = $makeDatabase(TEST_EXTRA_DATABASE);
+
+        try {
+            $makeBackupTables();
+
+            $empty = $c->api('backup', ['db' => $db, 'rows' => false, 'tables' => array_map($tableRef, ['probe_bk_parent', 'probe_bk_child'])]);
+            same(200, $empty['status']);
+            check(preg_match('/^\s*insert\s+into/mi', $empty['body']) === 0, 'no row is in it');
+            check(str_contains($empty['body'], 'probe_bk_parent') && str_contains($empty['body'], 'probe_bk_child'), 'the tables are');
+
+            $c->ok('restore', ['db' => $extraId, 'statements' => $splitScript($empty['body'])]);
+            same(['probe_bk_child', 'probe_bk_parent'], $tablesOf($extra), 'the tables are made');
+            same([0, 0], [(int) $extra->query('select count(*) from probe_bk_parent')->fetchColumn(), (int) $extra->query('select count(*) from probe_bk_child')->fetchColumn()], 'and they are empty');
+            same(3, (int) $pdo->query('select count(*) from probe_bk_parent')->fetchColumn(), 'the original keeps its rows');
+
+            // One table picked: only that one is in the file, and only that one is made.
+            $extra = null;
+            $extra = $makeDatabase(TEST_EXTRA_DATABASE);
+            $solo = $c->api('backup', ['db' => $db, 'tables' => [$tableRef('probe_bk_solo')]]);
+            same(200, $solo['status']);
+
+            foreach (['probe_bk_parent', 'probe_bk_child', 'probe_bk_view'] as $other) {
+                check(! str_contains($solo['body'], $other), "{$other} was not picked, so it is not in the file");
+            }
+
+            $c->ok('restore', ['db' => $extraId, 'statements' => $splitScript($solo['body'])]);
+            same(['probe_bk_solo'], $tablesOf($extra), 'only the picked table is made');
+            same([[1, 'alone']], array_map(fn ($row) => [(int) $row[0], $row[1]], $extra->query('select id, v from probe_bk_solo')->fetchAll(PDO::FETCH_NUM)));
+        } finally {
+            $extra = null;
+            $dropBackupTables($pdo);
+            $dropDatabase(TEST_EXTRA_DATABASE);
+        }
+    });
+
+    test("{$tag} a backup of a table that is not in the catalog is refused, and so is one of nothing", function () use ($c, $db, $count, $tableRef) {
+        $before = $count();
+
+        foreach ([
+            'a name that is not there' => [$tableRef('items'), $tableRef('no_such_table')],
+            'a name with SQL in it' => [$tableRef('items; drop table items; --')],
+            'a name with quotes in it' => [$tableRef('items" where 1=1 --'), $tableRef("items'")],
+            'a schema that is not there' => [$tableRef('items', 'no_such_schema')],
+        ] as $why => $tables) {
+            $r = $c->api('backup', ['db' => $db, 'tables' => $tables]);
+            check($r['status'] >= 400 && str_contains((string) ($r['json']['error'] ?? ''), 'There is no table'), "{$why}: no file, and a message that names the problem: {$r['status']} ".substr($r['body'], 0, 200));
+        }
+
+        $c->refused('backup', ['db' => $db, 'tables' => []]);
+        $c->refused('backup', ['db' => 'nope/x'], 'not on the list');
+        same($before, $count(), 'nothing was changed');
+    });
+
+    test("{$tag} a backup of the whole database has every table and view in it", function () use ($c, $db, $pdo, $tablesOf) {
+        $everything = $c->api('backup', ['db' => $db, 'tables' => null]);
+
+        same(200, $everything['status'], substr($everything['body'], 0, 300));
+        $names = array_filter($tablesOf($pdo), fn (string $name) => preg_match('/^[a-z0-9_]+$/', $name) === 1);
+        check(count($names) >= 5, 'the fixtures are there: '.implode(', ', $names));
+
+        foreach ($names as $name) {
+            check(str_contains($everything['body'], $name), "{$name} is in the backup");
+        }
+
+        check(preg_match('/^\s*insert\s+into/mi', $everything['body']) === 1, 'and so are the rows');
+    });
+
+    if ($driver === 'pgsql') {
+        test("{$tag} a backup keeps two tables of the same name that are in different schemas", function () use ($c, $db, $extraId, $pdo, $tableRef, $splitScript, $makeDatabase, $dropDatabase) {
+            $extra = $makeDatabase(TEST_EXTRA_DATABASE);
+            $schemas = ['probe_s1' => 'one', 'probe_s2' => 'two'];
+
+            try {
+                foreach ($schemas as $name => $label) {
+                    $pdo->exec("drop schema if exists {$name} cascade");
+                    $pdo->exec("create schema {$name}");
+                    $pdo->exec("create table {$name}.probe_dup (id integer primary key, v text)");
+                    $pdo->exec("insert into {$name}.probe_dup values (1, '{$label}'), (2, 'it''s {$label}')");
+                }
+
+                $backup = $c->api('backup', ['db' => $db, 'tables' => [$tableRef('probe_dup', 'probe_s1'), $tableRef('probe_dup', 'probe_s2')]]);
+                same(200, $backup['status'], substr($backup['body'], 0, 300));
+                $c->ok('restore', ['db' => $extraId, 'statements' => $splitScript($backup['body'])]);
+
+                foreach ($schemas as $name => $label) {
+                    $read = fn (PDO $on): array => $on->query("select id, v from {$name}.probe_dup order by id")->fetchAll(PDO::FETCH_NUM);
+                    same([[1, $label], [2, "it's {$label}"]], $read($extra), "{$name}.probe_dup in the new database");
+                    same($read($pdo), $read($extra));
+                }
+            } finally {
+                $extra = null;
+
+                foreach (array_keys($schemas) as $name) {
+                    $pdo->exec("drop schema if exists {$name} cascade");
+                }
+
+                $dropDatabase(TEST_EXTRA_DATABASE);
+            }
+        });
+
+        // A line break of any kind ends a comment, so a name that has one must not be written into a comment line as it is.
+        test("{$tag} a name with a carriage return in it stays inside its quotes, and the comment lines of a backup stay comments", function () use ($c, $db, $extraId, $pdo, $q, $tableRef, $splitScript, $backupHeader, $makeDatabase, $dropDatabase, $tablesOf) {
+            $extra = $makeDatabase(TEST_EXTRA_DATABASE);
+            $plain = "probe_bk_cr\rtable";
+            $parted = "probe_bk_cr\rparted";
+            $column = "co\rl";
+
+            try {
+                $pdo->exec('create table '.$q($plain)." (id integer primary key, {$q($column)} text)");
+                $pdo->exec('insert into '.$q($plain)." values (1, 'x')");
+                $pdo->exec('create table '.$q($parted).' (id integer, v text) partition by range (id)');
+                $pdo->exec('create table '.$q($parted.'_1').' partition of '.$q($parted).' for values from (0) to (10)');
+
+                $backup = $c->api('backup', ['db' => $db, 'tables' => [$tableRef($plain), $tableRef($parted)]]);
+                same(200, $backup['status'], substr($backup['body'], 0, 300));
+                $header = $backupHeader($backup['body']);
+                check($header !== [] && count(array_filter($header, fn (string $line) => ! str_starts_with($line, '--'))) === 0, 'every line of the opening comment is a comment: '.json_encode($header));
+
+                $c->ok('restore', ['db' => $extraId, 'statements' => $splitScript($backup['body'])]);
+                check(in_array($plain, $tablesOf($extra), true), 'the table with the carriage return in its name is made');
+                same([[1, 'x']], array_map(fn ($row) => [(int) $row[0], $row[1]], $extra->query('select id, '.$q($column).' from '.$q($plain))->fetchAll(PDO::FETCH_NUM)));
+            } finally {
+                $extra = null;
+                $pdo->exec('drop table if exists '.$q($parted).' cascade');
+                $pdo->exec('drop table if exists '.$q($plain));
+                $dropDatabase(TEST_EXTRA_DATABASE);
+            }
+        });
+    }
+
+    // Restore runs the statements the page split out of a file, in one transaction.
+
+    test("{$tag} a restore runs its statements together, and one that fails keeps none of the rows and names its number", function () use ($c, $db, $pdo, $count, $dropTables) {
+        $dropTables('probe_rs');
+        $pdo->exec('create table probe_rs (id integer primary key, v varchar(20))');
+
+        try {
+            $insert = fn (int $id, string $v = 'x') => "insert into probe_rs values ({$id}, '{$v}')";
+            $c->refused('restore', ['db' => $db, 'statements' => [$insert(1), $insert(2), $insert(1, 'again'), $insert(4), $insert(5)]], 'Statement 3 of 5');
+            same(0, $count('probe_rs'), 'the two rows before the failure are not kept');
+
+            // A statement that is not SQL at all.
+            $c->refused('restore', ['db' => $db, 'statements' => [$insert(1), 'this is not sql', $insert(3)]], 'Statement 2 of 3');
+            same(0, $count('probe_rs'));
+
+            $c->ok('restore', ['db' => $db, 'statements' => [$insert(1, 'a'), "insert into probe_rs values (2, 'it''s; -- fine')", $insert(3)]]);
+            same([1 => 'a', 2 => "it's; -- fine", 3 => 'x'], $pdo->query('select id, v from probe_rs order by id')->fetchAll(PDO::FETCH_KEY_PAIR));
+        } finally {
+            $dropTables('probe_rs');
+        }
+    });
+
+    test("{$tag} a restore that fails after making a table keeps nothing on PostgreSQL, and keeps the table on MySQL", function () use ($c, $db, $pdo, $driver, $hasTable, $dropTables) {
+        $dropTables('probe_rs_made');
+
+        try {
+            $c->refused('restore', ['db' => $db, 'statements' => [
+                'create table probe_rs_made (id integer primary key)',
+                'insert into probe_rs_made values (1)',
+                'this is not sql',
+                'insert into probe_rs_made values (2)',
+            ]], 'Statement 3 of 4');
+
+            // MySQL commits by itself at every CREATE TABLE, so a table made before the failure is there afterwards. That is
+            // known, and the message tells the person to restore into an empty database. PostgreSQL undoes the table too.
+            same($driver === 'mysql', $hasTable('probe_rs_made'), $driver === 'mysql' ? 'MySQL keeps the table it made' : 'PostgreSQL keeps nothing');
+
+            if ($driver === 'pgsql') {
+                $dropTables('probe_rs_made');
+                $c->refused('restore', ['db' => $db, 'statements' => ['create table probe_rs_made (id integer)', 'insert into probe_rs_made values (1)', 'insert into no_such_table values (1)']], 'Statement 3 of 3');
+                same(false, $hasTable('probe_rs_made'), 'no table, whatever the statement before the failure did');
+            }
+        } finally {
+            $dropTables('probe_rs_made');
+        }
+    });
+
+    test("{$tag} a restore with no statements in it is refused", function () use ($c, $db) {
+        $c->refused('restore', ['db' => $db, 'statements' => []], 'no SQL');
+        $c->refused('restore', ['db' => $db], 'no SQL');
+        $c->refused('restore', ['db' => $db, 'statements' => ['', '   ', "\n"]], 'no SQL');
+        $c->refused('restore', ['db' => 'nope/x', 'statements' => ['select 1']], 'not on the list');
+    });
+
+    test("{$tag} a restore is a change, so a protected database that is locked refuses it", function () use ($c, $db, $pdo, $count, $protectInPage, $unprotect, $lockAgain, $unlock, $refusedLocked, $dropTables) {
+        $dropTables('probe_rs');
+        $pdo->exec('create table probe_rs (id integer primary key)');
+
+        try {
+            $protectInPage($db);
+            $refusedLocked('restore', ['db' => $db, 'statements' => ['insert into probe_rs values (1)', 'insert into probe_rs values (2)']]);
+            $refusedLocked('restore', ['db' => $db, 'statements' => ['drop table probe_rs']]);
+            same(0, $count('probe_rs'), 'nothing was run');
+
+            $unlock($db, TEST_DATABASE);
+            $c->ok('restore', ['db' => $db, 'statements' => ['insert into probe_rs values (1)', 'insert into probe_rs values (2)']]);
+            same(2, $count('probe_rs'), 'unlocked, it runs');
+        } finally {
+            $unprotect();
+            $lockAgain($db);
+            $dropTables('probe_rs');
+        }
+    });
+
+    // Compare. The database that is open ($pdo, sqlaris_test) is the one the SQL would change, and the other one
+    // (sqlaris_test_extra) is what it should look like. Both have tables of their own, and the tables of the fixtures
+    // are only in the open one, so the tests look at their own tables and not at the lists as a whole.
+
+    $dropCompareTables = function (PDO $on): void {
+        foreach (['probe_cmp_view_there', 'probe_cmp_view_same', 'probe_cmp_view_diff'] as $view) {
+            $on->exec("drop view if exists {$view}");
+        }
+
+        foreach (['probe_cmp_both', 'probe_cmp_ref', 'probe_cmp_only_here', 'probe_cmp_only_there', 'probe_cmp_type'] as $table) {
+            $on->exec("drop table if exists {$table}");
+        }
+    };
+    $makeCompareTables = function (PDO $here, PDO $there) use ($driver, $dropCompareTables): void {
+        // MySQL wants an index under a key, and an index of its own on both sides keeps the comparison to the key.
+        $index = $driver === 'mysql' ? ', key probe_cmp_ref_idx (ref_id)' : '';
+
+        foreach ([$here, $there] as $on) {
+            $dropCompareTables($on);
+            $on->exec('create table probe_cmp_ref (id integer primary key)');
+            $on->exec('insert into probe_cmp_ref values (1)');
+        }
+
+        $here->exec("create table probe_cmp_both (id integer primary key, keep varchar(50), only_here varchar(50), nullable_diff integer, default_diff integer default 2, ref_id integer{$index})");
+        $here->exec("insert into probe_cmp_both values (1, 'k1', 'h1', 10, 5, 1), (2, 'k2', null, 20, null, null)");
+        $here->exec('create table probe_cmp_only_here (id integer primary key)');
+
+        $there->exec("create table probe_cmp_both (id integer primary key, keep varchar(50), only_there varchar(50), nullable_diff integer not null, default_diff integer default 1, ref_id integer{$index},
+            constraint probe_cmp_fk_there foreign key (ref_id) references probe_cmp_ref (id))");
+        $there->exec('create index probe_cmp_idx_there on probe_cmp_both (keep)');
+        $there->exec('create table probe_cmp_only_there (id integer primary key, note varchar(20))');
+        $there->exec('create view probe_cmp_view_there as select id from probe_cmp_ref');
+    };
+    // The items the answer lists for a table, or null when the table is not in "changed".
+    $itemsOf = function (array $answer, string $table) use ($bare): ?array {
+        foreach ($answer['changed'] as $entry) {
+            if ($bare($entry['table']) === $table) {
+                return $entry['items'];
+            }
+        }
+
+        return null;
+    };
+    $mentions = fn (array $items, string $word): array => array_values(array_filter($items, fn (array $item) => str_contains($item['what'], $word)));
+    $constraintsOf = fn (PDO $on, string $table): array => $on->query("select constraint_name from information_schema.table_constraints
+        where table_schema = {$schema} and table_name = '{$table}' and constraint_type = 'FOREIGN KEY'")->fetchAll(PDO::FETCH_COLUMN);
+
+    test("{$tag} compare lists what differs, its SQL makes the open database like the other, and nothing in it drops anything", function () use ($c, $db, $extraId, $pdo, $bare, $itemsOf, $mentions, $constraintsOf, $tablesOf, $columnsOf, $columnInfo, $indexesOf, $makeDatabase, $dropDatabase, $makeCompareTables, $dropCompareTables, $lines, $schema) {
+        $there = $makeDatabase(TEST_EXTRA_DATABASE);
+
+        try {
+            $makeCompareTables($pdo, $there);
+            $before = $c->ok('compare', ['db' => $db, 'other' => $extraId]);
+            $tablesBefore = $tablesOf($pdo);
+            $columnsBefore = $columnsOf('probe_cmp_both');
+            $rowsBefore = $pdo->query('select id, keep, only_here, nullable_diff, default_diff, ref_id from probe_cmp_both order by id')->fetchAll(PDO::FETCH_NUM);
+
+            // A table and a view only the other one has, a table only this one has, and one both have.
+            $missing = array_map($bare, $before['missing']);
+            $extra = array_map($bare, $before['extra']);
+            check(in_array('probe_cmp_only_there', $missing, true) && in_array('probe_cmp_view_there', $missing, true), 'missing here: '.json_encode($before['missing']));
+            check(! in_array('probe_cmp_both', $missing, true) && ! in_array('probe_cmp_ref', $missing, true), 'a table both have is not missing');
+            check(in_array('probe_cmp_only_here', $extra, true), 'only here: '.json_encode($before['extra']));
+            check(! in_array('probe_cmp_both', $extra, true) && ! in_array('probe_cmp_only_there', $extra, true), 'a table the other has is not extra');
+            check(is_int($before['same']) && $before['same'] >= 1, 'probe_cmp_ref is the same in both: '.json_encode($before['same']));
+            same(null, $itemsOf($before, 'probe_cmp_ref'), 'a table that is the same is not listed as changed');
+
+            // What differs inside the table both have.
+            $items = $itemsOf($before, 'probe_cmp_both');
+            check($items !== null, 'probe_cmp_both is listed as changed: '.json_encode($before['changed']));
+
+            foreach (['only_there', 'only_here', 'nullable_diff', 'default_diff', 'probe_cmp_idx_there', 'probe_cmp_fk_there'] as $word) {
+                check(count($mentions($items, $word)) === 1, "one item says something about {$word}: ".json_encode($items));
+            }
+
+            same('only here', $mentions($items, 'only_here')[0]['change'], 'a column only this one has');
+            check($mentions($items, 'only_there')[0]['change'] !== 'only here', 'a column only the other has is not "only here"');
+
+            foreach (['nullable_diff', 'default_diff'] as $word) {
+                $item = $mentions($items, $word)[0];
+                check(isset($item['there'], $item['here']) && $item['there'] !== $item['here'], "{$word} shows how it is there and how it is here: ".json_encode($item));
+            }
+
+
+            // Nothing in "sql" drops a table, a view or a column, and everything in "drops" is a comment, line by line.
+            check($before['sql'] !== [], 'there is SQL');
+
+            foreach ($before['sql'] as $statement) {
+                check(preg_match('/\bdrop\s+(table|view|column|schema|database)\b/i', $statement) === 0, "sql must not drop: {$statement}");
+            }
+
+            check($before['drops'] !== [], 'what would be dropped is listed');
+
+            foreach ($before['drops'] as $drop) {
+                foreach ($lines($drop) as $line) {
+                    check(str_starts_with($line, '-- '), "every line of a drop is commented out: {$drop}");
+                }
+            }
+
+            $dropped = implode("\n", $before['drops']);
+            check(str_contains($dropped, 'probe_cmp_only_here'), 'the table only here is in the drops');
+            check(preg_match('/only_here/', str_replace('probe_cmp_only_here', '', $dropped)) === 1, 'and so is the column only here');
+
+            // Run all of it, as a person would who pressed the button.
+            foreach ($before['sql'] as $statement) {
+                $pdo->exec($statement);
+            }
+
+            check(array_diff($tablesBefore, $tablesOf($pdo)) === [], 'no table is gone');
+            check(array_diff($columnsBefore, $columnsOf('probe_cmp_both')) === [], 'no column is gone');
+            same($rowsBefore, $pdo->query('select id, keep, only_here, nullable_diff, default_diff, ref_id from probe_cmp_both order by id')->fetchAll(PDO::FETCH_NUM), 'and the rows are as they were');
+
+            foreach (['probe_cmp_only_there', 'probe_cmp_view_there'] as $made) {
+                check(in_array($made, $tablesOf($pdo), true), "{$made} was made");
+            }
+
+            check(in_array('only_there', $columnsOf('probe_cmp_both'), true), 'the column was added');
+            check(in_array('probe_cmp_idx_there', $indexesOf($pdo, 'probe_cmp_both'), true), 'the index was added');
+            check(in_array('probe_cmp_fk_there', $constraintsOf($pdo, 'probe_cmp_both'), true), 'the key was added');
+            same('NO', $columnInfo('probe_cmp_both', 'nullable_diff')['nullable'] ?? null, 'the column is not null now');
+            same('1', (string) $pdo->query("select column_default from information_schema.columns where table_schema = {$schema} and table_name = 'probe_cmp_both' and column_name = 'default_diff'")->fetchColumn(), 'and has the other default');
+
+            // Compare again: nothing is missing, and what is left is what only this one has.
+            $after = $c->ok('compare', ['db' => $db, 'other' => $extraId]);
+            same([], $after['missing'], 'nothing is missing now');
+
+            foreach ($after['changed'] as $entry) {
+                foreach ($entry['items'] as $item) {
+                    same('only here', $item['change'], "{$entry['table']}: {$item['what']}");
+                }
+            }
+
+            same([], $after['sql'], 'and there is no SQL left to run');
+
+            $items = $itemsOf($after, 'probe_cmp_both');
+            check($items !== null && count($mentions($items, 'only_here')) === 1, 'the column only here is still listed: '.json_encode($after['changed']));
+            check(in_array('probe_cmp_only_here', array_map($bare, $after['extra']), true), 'and so is the table only here');
+        } finally {
+            $dropCompareTables($pdo);
+            $there = null;
+            $dropDatabase(TEST_EXTRA_DATABASE);
+        }
+    });
+
+    test("{$tag} compare leaves a view that is the same in both alone, and changes one whose query differs", function () use ($c, $db, $extraId, $pdo, $bare, $itemsOf, $makeDatabase, $dropDatabase, $dropCompareTables) {
+        $there = $makeDatabase(TEST_EXTRA_DATABASE);
+
+        try {
+            $dropCompareTables($pdo);
+
+            foreach ([$pdo, $there] as $on) {
+                $on->exec('create table probe_cmp_ref (id integer primary key)');
+                $on->exec('insert into probe_cmp_ref values (0), (1), (2)');
+                $on->exec('create view probe_cmp_view_same as select id from probe_cmp_ref where id < 2');
+            }
+
+            $pdo->exec('create view probe_cmp_view_diff as select id from probe_cmp_ref');
+            $there->exec('create view probe_cmp_view_diff as select id from probe_cmp_ref where id > 0');
+
+            $answer = $c->ok('compare', ['db' => $db, 'other' => $extraId]);
+            same(null, $itemsOf($answer, 'probe_cmp_view_same'), 'the same view in both is not listed as changed');
+            check($itemsOf($answer, 'probe_cmp_view_diff') !== null, 'the view with another query is listed: '.json_encode($answer['changed']));
+            check(! in_array('probe_cmp_view_diff', array_map($bare, array_merge($answer['missing'], $answer['extra'])), true), 'and it is in both');
+            check($answer['sql'] !== [], 'with SQL that makes it like the other');
+
+            foreach ($answer['sql'] as $statement) {
+                check(preg_match('/\bdrop\s+(table|column|schema|database)\b/i', $statement) === 0, "sql must not drop: {$statement}");
+                $pdo->exec($statement);
+            }
+
+            same([1, 2], array_map('intval', $pdo->query('select id from probe_cmp_view_diff order by id')->fetchAll(PDO::FETCH_COLUMN)), 'the view gives what the other one gives');
+            same([0, 1], array_map('intval', $pdo->query('select id from probe_cmp_view_same order by id')->fetchAll(PDO::FETCH_COLUMN)), 'and the one that was the same is as it was');
+
+            $after = $c->ok('compare', ['db' => $db, 'other' => $extraId]);
+            same(null, $itemsOf($after, 'probe_cmp_view_diff'), 'nothing is left to change in it');
+            same(null, $itemsOf($after, 'probe_cmp_view_same'));
+            same([], $after['sql'], 'and no SQL is left');
+        } finally {
+            $dropCompareTables($pdo);
+            $there = null;
+            $dropDatabase(TEST_EXTRA_DATABASE);
+        }
+    });
+
+    test("{$tag} a column whose type differs is left to the person: its statement is commented out, and the values stay", function () use ($c, $db, $extraId, $pdo, $itemsOf, $mentions, $columnInfo, $makeDatabase, $dropDatabase, $dropCompareTables, $lines) {
+        $there = $makeDatabase(TEST_EXTRA_DATABASE);
+        $long = str_repeat('long value ', 5);
+
+        try {
+            $dropCompareTables($pdo);
+            $pdo->exec('create table probe_cmp_type (id integer primary key, label varchar(100))');
+            $pdo->prepare('insert into probe_cmp_type values (1, ?)')->execute([$long]);
+            $there->exec('create table probe_cmp_type (id integer primary key, label varchar(10))');
+
+            $answer = $c->ok('compare', ['db' => $db, 'other' => $extraId]);
+            $items = $itemsOf($answer, 'probe_cmp_type');
+            check($items !== null && count($mentions($items, 'label')) === 1, 'the column is listed: '.json_encode($answer['changed']));
+            check(isset($mentions($items, 'label')[0]['there'], $mentions($items, 'label')[0]['here']), 'with how it is there and how it is here');
+
+            $drops = implode("\n", $answer['drops']);
+            check(str_contains($drops, 'label'), 'the statement that would change it is in the drops: '.json_encode($answer['drops']));
+
+            foreach ($answer['drops'] as $drop) {
+                foreach ($lines($drop) as $line) {
+                    check(str_starts_with($line, '-- '), "every line of a drop is commented out: {$drop}");
+                }
+            }
+
+            foreach ($answer['sql'] as $statement) {
+                check(! str_contains($statement, 'probe_cmp_type'), "the type is not changed by the SQL that runs: {$statement}");
+                $pdo->exec($statement);
+            }
+
+            same(100, (int) $columnInfo('probe_cmp_type', 'label')['len'], 'the column is as wide as it was');
+            same($long, $pdo->query('select label from probe_cmp_type where id = 1')->fetchColumn(), 'and the value is whole');
+        } finally {
+            $dropCompareTables($pdo);
+            $there = null;
+            $dropDatabase(TEST_EXTRA_DATABASE);
+        }
+    });
+
+    test("{$tag} compare needs a database on the list, of the same system", function () use ($c, $db, $serverKey, $driver) {
+        $c->refused('compare', ['db' => $db, 'other' => 'nope/'.TEST_EXTRA_DATABASE], 'not on the list');
+        $c->refused('compare', ['db' => $db, 'other' => $serverKey.'/mysql_or_postgres_not_listed'], 'not on the list');
+        $c->refused('compare', ['db' => $db]);
+        $c->refused('compare', ['db' => 'nope/x', 'other' => $db], 'not on the list');
+
+        // Another system, when the run has both servers: its list is not this one.
+        $env = dbv_env_file(__DIR__.'/../.env') + getenv();
+        $otherKey = $driver === 'pgsql' ? 'my' : 'pg';
+
+        if (($env[$driver === 'pgsql' ? 'TEST_MYSQL_HOST' : 'TEST_PGSQL_HOST'] ?? '') !== '') {
+            $c->refused('compare', ['db' => $db, 'other' => $otherKey.'/'.TEST_DATABASE]);
+        }
+    });
+
+    test("{$tag} backup and compare only read, so a protected database that is locked gives them", function () use ($c, $db, $extraId, $pdo, $tableRef, $protectInPage, $unprotect, $lockAgain, $refusedLocked, $makeBackupTables, $dropBackupTables, $makeDatabase, $dropDatabase, $bump, $makeProbes, $dropProbes) {
+        $extra = $makeDatabase(TEST_EXTRA_DATABASE);
+
+        try {
+            $makeBackupTables();
+            $makeProbes($pdo);
+            $protectInPage($db);
+            // It is locked: a change is refused. Both of these have to work all the same.
+            $refusedLocked('update', $bump($db, '5'));
+
+            $backup = $c->api('backup', ['db' => $db, 'tables' => [$tableRef('probe_bk_solo')]]);
+            same(200, $backup['status'], substr($backup['body'], 0, 200));
+            check(str_contains($backup['body'], 'probe_bk_solo'), 'the backup has the table');
+
+            $compare = $c->ok('compare', ['db' => $db, 'other' => $extraId]);
+            check(isset($compare['missing'], $compare['sql']), 'compare answers');
+        } finally {
+            $unprotect();
+            $lockAgain($db);
+            $extra = null;
+            $dropProbes($pdo);
+            $dropBackupTables($pdo);
+            $dropDatabase(TEST_EXTRA_DATABASE);
+        }
+    });
+
+    // Two ways round the lock that are closed: taking the protection off in the layout, and copying the database.
+
+    test("{$tag} the protection a person set comes off only while the database is unlocked, and goes on without an unlock", function () use ($c, $db, $extraId, $signIn, $protectInPage, $unprotect, $lockAgain, $unlock) {
+        $saved = fn () => $c->ok('databases')['layout']['protected'];
+
+        try {
+            $lockAgain($db, $extraId);
+
+            // Putting it on never needs an unlock.
+            $protectInPage($db);
+            same([$db], $saved(), 'protected');
+
+            // Taking it off while it is locked is refused, with the flag, the database and the words of every other refusal.
+            $r = $c->api('layout', ['layout' => []]);
+            same(423, $r['status'], 'taking it off while locked: '.substr($r['body'], 0, 200));
+            same([true, $db], [$r['json']['protected'] ?? null, $r['json']['db'] ?? null], 'the answer says which database holds it');
+            check(str_contains((string) ($r['json']['error'] ?? ''), 'is protected') && str_contains((string) $r['json']['error'], TEST_DATABASE), 'the message: '.($r['json']['error'] ?? ''));
+            same([$db], $saved(), 'and it is still on');
+            same([$db], json_decode((string) file_get_contents($c->server->layout), true)['protected'], 'in the file too');
+
+            // A change to the rest of the layout that keeps it needs no unlock.
+            $c->ok('layout', ['layout' => ['protected' => [$db], 'hidden' => ['other/db']]]);
+            same(['other/db'], $c->ok('databases')['layout']['hidden'], 'the rest of the layout is saved');
+            same([$db], $saved());
+
+            // A second browser that did not unlock it cannot take it off, whoever else did.
+            $unlock($db, TEST_DATABASE);
+            $other = $signIn();
+            $r = $other->api('layout', ['layout' => []]);
+            same(423, $r['status'], 'another session, which did not unlock it');
+            same([$db], $saved());
+
+            // Unlocked, it comes off.
+            $c->ok('layout', ['layout' => []]);
+            same([], $saved(), 'unlocked, it comes off');
+            $c->ok('lock', ['db' => $db]);
+
+            // With two, taking off the one that is locked is refused, and the one that is unlocked may go.
+            $protectInPage($db, $extraId);
+            $unlock($extraId, TEST_EXTRA_DATABASE);
+            $r = $c->api('layout', ['layout' => ['protected' => [$extraId]]]);
+            same([423, $db], [$r['status'], $r['json']['db'] ?? null], 'the locked one is named');
+            same([$db, $extraId], $saved(), 'neither came off');
+            $c->ok('layout', ['layout' => ['protected' => [$db]]]);
+            same([$db], $saved(), 'the unlocked one came off, and the other stayed');
+        } finally {
+            $unprotect();
+            $lockAgain($db, $extraId);
+        }
+    });
+
+    test("{$tag} copying a protected database is refused while it is locked, and making an empty one is not", function () use ($c, $lockedId, $connect, $hasDatabase, $tablesOf, $unlock, $lockAgain, $makeDatabase, $dropDatabase, $makeProbes) {
+        $inside = $makeDatabase(TEST_LOCKED_DATABASE);
+
+        try {
+            $makeProbes($inside);
+
+            // The config protects it, so it is locked from the start.
+            $r = $c->api('create_database', ['db' => $lockedId, 'name' => TEST_EXTRA_DATABASE, 'copy' => true]);
+            same(423, $r['status'], 'a copy: '.substr($r['body'], 0, 200));
+            same([true, $lockedId], [$r['json']['protected'] ?? null, $r['json']['db'] ?? null]);
+            check(str_contains((string) ($r['json']['error'] ?? ''), 'is protected'), 'the message: '.($r['json']['error'] ?? ''));
+            same(false, $hasDatabase(TEST_EXTRA_DATABASE), 'nothing was made');
+
+            // An empty database is not a copy of anything.
+            $c->ok('create_database', ['db' => $lockedId, 'name' => TEST_EXTRA_DATABASE]);
+            same(true, $hasDatabase(TEST_EXTRA_DATABASE), 'an empty one is made');
+            same([], $tablesOf($connect(TEST_EXTRA_DATABASE)), 'and it is empty');
+            $dropDatabase(TEST_EXTRA_DATABASE);
+
+            // Unlocked, the copy is made, with the tables of the original. PostgreSQL ends the sessions in the original to do it.
+            $unlock($lockedId, TEST_LOCKED_DATABASE);
+            $inside = null;
+            $c->ok('create_database', ['db' => $lockedId, 'name' => TEST_EXTRA_DATABASE, 'copy' => true]);
+            check(in_array('probe_locked', $tablesOf($connect(TEST_EXTRA_DATABASE)), true), 'unlocked, the copy has the tables');
+        } finally {
+            $lockAgain($lockedId);
+            $inside = null;
+            $dropDatabase(TEST_EXTRA_DATABASE);
+            $dropDatabase(TEST_LOCKED_DATABASE);
+        }
     });
 
     // Making and dropping databases. The config lists sqlaris_test and one more name, so that is the only one to make.
