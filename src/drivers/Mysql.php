@@ -929,10 +929,11 @@ final class DbvMysql extends DbvDriver
         $fks = [];
 
         // Two lookups, each by schema and table: joined, MariaDB reads every database on the server.
+        // MySQL 8 names information_schema columns in capitals unless they are given a name.
         $rules = [];
 
         foreach (dbv_all($this->pdo,
-            'select constraint_name as name, update_rule, delete_rule from information_schema.referential_constraints
+            'select constraint_name as name, update_rule as update_rule, delete_rule as delete_rule from information_schema.referential_constraints
             where constraint_schema = ? and table_name = ?', $params) as $row) {
             $rules[$row['name']] = " on delete {$row['delete_rule']} on update {$row['update_rule']}";
         }
